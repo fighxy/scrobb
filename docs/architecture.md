@@ -5,7 +5,7 @@
 
 ## 0. Вводные и ключевые ограничения
 
-**Этап 1:** пользователь регистрируется в Scrobb, создаёт API-токен и направляет свой плеер, браузерное расширение или приложение-скробблер **прямо в Scrobb**. Основа — **собственный приём скробблов** (ListenBrainz-совместимый API + Last.fm-совместимый эндпоинт, §3). По этим данным строятся профиль, статистика, стрики, достижения и сравнение с друзьями. **Last.fm — дополнительный модуль:** разовый импорт накопленной истории и, по желанию, постоянная синхронизация для тех, кто им ещё пользуется (§4). Почему так: Last.fm заблокирован в РФ (R1), его ToS запрещает коммерческое использование (R2), а свой приём даёт независимость и данные в реальном времени (§3.1). Архитектура рассчитана и на будущих провайдеров (§5).
+**Этап 1:** пользователь регистрируется в Scrobb, ставит **наше расширение браузера или десктоп-приложение** (основные клиенты, §18) и привязывает его к аккаунту одной кнопкой — или направляет в Scrobb уже привычный сторонний скробблер по API-токену. Основа — **собственный приём скробблов**: родной API для своих клиентов, ListenBrainz-совместимый API и Last.fm-совместимый эндпоинт для сторонних (§3). По этим данным строятся профиль, статистика, стрики, достижения и сравнение с друзьями. **Last.fm — дополнительный модуль:** разовый импорт накопленной истории и, по желанию, постоянная синхронизация для тех, кто им ещё пользуется (§4). Почему так: Last.fm заблокирован в РФ (R1), его ToS запрещает коммерческое использование (R2), а свой приём даёт независимость и данные в реальном времени (§3.1). Архитектура рассчитана и на будущих провайдеров (§5).
 
 Найденные в ходе исследования ограничения, которые прямо влияют на дизайн:
 
@@ -23,8 +23,9 @@
 
 | Слой | Назначение |
 |---|---|
+| **Клиенты-скробблеры** | **Свои** (предложение, §18): расширение браузера (TypeScript, Manifest V3) и десктоп-приложение (Tauri 2) — основной путь, родной API и привязка устройства. **Сторонние** (§3.3): ListenBrainz- и Last.fm 2.0-совместимые клиенты по API-токену |
 | **Frontend** (Next.js, SSR + клиентская интерактивность) | Публичные профили (SSR ради шаринга и SEO), личный кабинет, статистика и графики, стрики, достижения, друзья, настройки приватности. Работает только через Backend API |
-| **Backend API** (модульный монолит) | REST/JSON + OpenAPI. Модули: `auth`, `users/profiles`, `library` (артисты/альбомы/треки), `listens` (история), `stats`, `social` (подписки, приватность, лидерборды), `gamification` (стрики, достижения), `ingest` (Scrobble API, токены клиентов, §3), `integrations` (импорт и привязка внешних аккаунтов), `notifications`, `email` (адреса, одноразовые ссылки, сессии, отправка писем, §17), `media` (аватары/баннеры), `settings` (`user_preferences`), `billing` (донаты, Pro, §12), позже `recommendations`. Единая политика доступа (privacy guard) |
+| **Backend API** (модульный монолит) | REST/JSON + OpenAPI. Модули: `auth`, `users/profiles`, `library` (артисты/альбомы/треки), `listens` (история), `stats`, `social` (подписки, приватность, лидерборды), `gamification` (стрики, достижения), `ingest` (Scrobble API: родной и совместимые протоколы, токены клиентов и привязка устройств, §3, §18), `integrations` (импорт и привязка внешних аккаунтов), `notifications`, `email` (адреса, одноразовые ссылки, сессии, отправка писем, §17), `media` (аватары/баннеры), `settings` (`user_preferences`), `billing` (донаты, Pro, §12), позже `recommendations`. Единая политика доступа (privacy guard) |
 | **Integration layer** | Провайдеры источников: **основной — push-приём от клиентов** (`PushScrobbleProvider`, §3), дополнительный — `LastFmProvider` (импорт и опциональная синхронизация, §4), позже Yandex/VK/Zvuk. Нормализация в `ListenEvent`, сопоставление с каноническими треками (matcher), клиенты Last.fm и MusicBrainz с rate limiter |
 | **Background workers + scheduler** | Разбор больших пакетов `import` от клиентов, импорт и опциональная синхронизация Last.fm (backfill/incremental/reconcile), обогащение метаданных, агрегаты (daily_activity, месячные rollup'ы), обработчики геймификации, пересчёт лидербордов, снапшоты топов и отчёты (§9), доставка уведомлений, обработка изображений, позже ночные рекомендации |
 | **Storage** | PostgreSQL — источник истины, `listens` секционированы по времени. Valkey (два экземпляра — очередь и кэш, §7.1) — очередь задач, лимиты частоты (токены клиентов, Last.fm, MusicBrainz), кэш, горячие лидерборды (sorted sets), now playing с TTL. Объектное хранилище S3 в РФ — аватары и баннеры, выгрузки данных |
@@ -32,88 +33,72 @@
 Внутренние события через **transactional outbox**: событие пишется в таблицу `outbox` в той же транзакции, что и данные, а воркер-диспетчер раздаёт его обработчикам. Это даёт «at-least-once» доставку, поэтому все обработчики идемпотентны.
 
 ```mermaid
+---
+config:
+  layout: elk
+---
 flowchart LR
-  subgraph Clients
-    WEB["Frontend (Next.js)"]
+  subgraph USERS["Пользователи"]
+    OWNEXT["Своё расширение браузера (§18)"]
+    OWNDESK["Своё десктоп-приложение (§18)"]
+    PUSH["Сторонние скробблеры: Web Scrobbler,<br/>Pano Scrobbler, rescrobbled, foobar2000, Navidrome…"]
+    WEB["Веб-приложение (Next.js)"]
     TGU["Telegram"]
-    PUSH["Скробблеры: Web Scrobbler, Pano Scrobbler,<br/>rescrobbled, foobar2000, Navidrome…"]
   end
 
-  subgraph API["Backend API (FastAPI, модульный монолит)"]
-    AUTH["auth: VK ID / Яндекс ID / телефон"]
-    CORE["profiles · listens · stats"]
-    SOC["social: follows · privacy · leaderboards"]
-    GAMI["gamification: streaks · achievements"]
-    ING["Scrobble API (основной вход):<br/>ListenBrainz-совм. + Last.fm 2.0-совм."]
-    NOTIF["notifications · email · settings · media"]
-    BILL["billing: донаты · Pro · entitlements"]
-    BOT["bot (aiogram 3, webhook) §13"]
-    RECS["recommendations (этап 2)"]
+  subgraph BE["Бэкенд — модульный монолит (FastAPI); процессы api · worker · scheduler · bot"]
+    ING["api · Ingest — основной вход:<br/>родной API (§18.3) + ListenBrainz- и Last.fm 2.0-совм. (§3)"]
+    CORE["api · auth (VK ID / Яндекс ID / телефон, устройства §18.4),<br/>profiles · listens · stats · social · gamification"]
+    BILL["api · billing: донаты · Pro · entitlements (§12)"]
+    NOTIF["api · notifications · email · settings · media"]
+    BOT["bot · aiogram 3, webhook (§13)"]
+    INT["Integration layer (§5): Normalizer + Matcher,<br/>Provider registry (LastFmProvider; Yandex / VK / Zvuk — позже)"]
+    SYNC["worker · scheduler + импорт и опц. sync Last.fm"]
+    ENR["worker · обогащение (MusicBrainz, Last.fm *.getInfo)"]
+    AGG["worker · агрегаты, стрики, достижения,<br/>лидерборды, топы и отчёты (обработчики outbox)"]
+    DLV["worker · доставка уведомлений: in-app, Telegram, email"]
+    MED["worker · изображения, PNG-карточки"]
   end
 
-  subgraph INT["Integration layer"]
-    REG["Provider registry"]
-    LFM["LastFmProvider (импорт, опц. sync)"]
-    FUT["Yandex / VK / Zvuk (будущее)"]
-    MATCH["Normalizer + Matcher"]
+  subgraph DATA["Данные (РФ)"]
+    PG[("PostgreSQL<br/>listens по месяцам · outbox")]
+    RD[("Valkey<br/>очередь · кэш · лимиты · ZSET · now playing")]
+    S3[("S3 (РФ)")]
   end
 
-  subgraph WRK["Workers + Scheduler"]
-    SCHED["Scheduler"]
-    SYNC["Last.fm import/sync workers"]
-    ENR["Enrichment (MusicBrainz, Last.fm *.getInfo)"]
-    AGG["Stats aggregation"]
-    GH["Gamification handlers"]
-    LB["Leaderboard builder"]
-    SNAP["Top snapshots + reports"]
-    DLV["Delivery: email / Telegram"]
-    RND["Render: PNG-карточки"]
-    IMG["Image processing"]
-    RECW["Nightly recs (этап 2)"]
+  subgraph EXTS["Внешние сервисы"]
+    EG["Egress-узел (опц., вне РФ)"]
+    LASTFM[["Last.fm API"]]
+    MB[["MusicBrainz API"]]
+    YK[["ЮKassa API"]]
+    MAIL[["Email-провайдер (РФ, §17.8)"]]
   end
 
-  PG[("PostgreSQL<br/>listens partitioned")]
-  RD[("Valkey<br/>queue · cache · rate limit · ZSET")]
-  EG["Egress-узел (опц., вне РФ)"]
-  S3[("Object storage S3 (РФ)")]
-  LASTFM[["Last.fm API"]]
-  MB[["MusicBrainz API"]]
-  YK[["ЮKassa API"]]
-  MAIL[["Email-провайдер (РФ, §17.8)"]]
-
-  WEB --> API
+  OWNEXT -- "родной API · токен устройства" --> ING
+  OWNDESK -- "родной API · токен устройства" --> ING
   PUSH -- "Token / sk" --> ING
-  ING -- "playing_now" --> RD
-  API --> PG
-  API --> RD
-  SCHED --> RD --> SYNC
-  SYNC --> REG --> LFM --> EG --> LASTFM
-  REG -.-> FUT
-  ING --> MATCH
-  SYNC --> MATCH --> PG
-  PG -- "outbox: ListensImported" --> AGG --> PG
-  AGG -- "DailyActivityUpdated" --> GH --> PG
-  GH -- "AchievementUnlocked" --> SOC
-  AGG --> LB --> RD
-  AGG --> SNAP --> PG
-  GH -- "AchievementUnlocked / StreakAtRisk" --> NOTIF
-  SOC --> NOTIF --> DLV
-  NOTIF --> S3
-  IMG --> S3
-  RECW --> PG
-  RECS --> PG
-  RECW -.-> EG
-  ENR --> MB
-  ENR --> EG
-  ENR --> PG
-  BILL --> YK
-  TGU -- "webhook + secret_token" --> BOT
+  WEB -- "REST /api/v1" --> CORE
+  TGU <-- "webhook + secret_token · сообщения" --> BOT
   BOT -- "внутренний API" --> CORE
-  DLV --> TGU
-  DLV --> MAIL
-  MAIL -- "webhooks: bounce · complaint" --> NOTIF
-  RND --> S3
-  YK -- "webhooks" --> BILL
+  ING --> INT
+  SYNC --> INT
+  ING -- "listens · outbox" --> PG
+  ING -- "now playing" --> RD
+  CORE --> PG
+  PG -- "outbox → задачи" --> AGG
+  AGG --> PG
+  AGG -- "ZSET" --> RD
+  AGG -- "StreakAtRisk · AchievementUnlocked" --> DLV
+  NOTIF --> DLV
+  DLV -- "уведомления" --> BOT
+  DLV -- "письма" --> MAIL
+  MAIL -. "webhooks: bounce · complaint" .-> NOTIF
+  INT --> EG
+  ENR --> EG
+  ENR --> MB
+  EG --> LASTFM
+  MED --> S3
+  BILL <-- "платёж · webhook" --> YK
   BILL --> PG
 ```
 
@@ -178,6 +163,8 @@ erDiagram
   users ||--o{ notifications : ""
   users ||--o{ api_tokens : "клиенты-скробблеры (MVP)"
   api_tokens ||--o{ listens : "token_id"
+  users ||--o{ device_auth_requests : "привязка устройства (§18.4)"
+  api_tokens ||--o| device_auth_requests : "выдан по привязке"
   users ||--o{ ingest_batches : "большие import"
   api_tokens ||--o{ ingest_batches : "token_id"
   listens ||--o| listen_dedup : "скрытый дубль"
@@ -341,7 +328,7 @@ erDiagram
     timestamptz played_at PK
     bigint alias_id PK
     bigint track_id
-    smallint source "1=scrobb_lb|2=scrobb_as2|3=lastfm"
+    smallint source "1=scrobb_lb|2=scrobb_as2|3=lastfm|4=scrobb_native"
     bigint token_id FK
     timestamptz deleted_at
   }
@@ -413,11 +400,22 @@ erDiagram
   api_tokens {
     bigint id PK
     bigint user_id FK
-    text kind "api|as2_session"
+    text kind "api|as2_session|device"
     bigint parent_id
     bytea token_hash UK
+    text client_kind "extension|desktop"
     text last_client
     timestamptz revoked_at
+  }
+  device_auth_requests {
+    bigint id PK
+    bytea device_code_hash UK
+    text user_code UK
+    text client_kind
+    text status "pending|approved|denied|consumed"
+    bigint user_id FK
+    bigint token_id FK
+    timestamptz expires_at
   }
   ingest_batches {
     bigint id PK
@@ -632,7 +630,7 @@ CREATE TABLE listens (
   alias_id    bigint      NOT NULL,          -- нормализованный (artist, track)
   track_id    bigint      NOT NULL,          -- денормализация для статистики
   album_id    bigint,
-  source      smallint    NOT NULL,          -- 1=scrobb_lb, 2=scrobb_as2 (собственный приём), 3=lastfm (импорт/sync), 4+ — будущие провайдеры
+  source      smallint    NOT NULL,          -- 1=scrobb_lb, 2=scrobb_as2, 4=scrobb_native (собственный приём; 4 — свои клиенты, §18.3), 3=lastfm (импорт/sync), 5+ — будущие провайдеры
   token_id    bigint,                        -- api_tokens.id для собственного приёма (какое устройство прислало)
   account_id  bigint,                        -- external_accounts.id для импорта
   loved       boolean,
@@ -742,7 +740,7 @@ CREATE TABLE jobs_dead (
 );
 ```
 
-Остальные DDL-эскизы: `reserved_usernames` и `username_history` — в §2.5, email, сессии и согласия на рассылки — в §17.10, `api_tokens`, `profiles`, `favorites` — в §9.9, `notifications` — в §9.8, достижения — в §8.2, биллинг — в §12.4, Telegram — в §13.8.
+Остальные DDL-эскизы: `reserved_usernames` и `username_history` — в §2.5, email, сессии и согласия на рассылки — в §17.10, привязка устройств — в §18.4, `api_tokens`, `profiles`, `favorites` — в §9.9, `notifications` — в §9.8, достижения — в §8.2, биллинг — в §12.4, Telegram — в §13.8.
 
 **Объём.** При допущении (не измерено) 30 скробблов в день на активного пользователя 10 тыс. пользователей дают около 110 млн строк в год. Для PostgreSQL с месячными секциями это немного. TimescaleDB (hypertable + continuous aggregates) — вариант на потом, если ручные rollup'ы станут болью (§6).
 
@@ -857,7 +855,7 @@ CREATE TABLE reserved_usernames (name citext PRIMARY KEY, reason text);
 
 ### 3.1 Почему ядро — свой приём
 
-Плеер, браузерное расширение или приложение-скробблер **само отправляет прослушивания в Scrobb** по API-токену пользователя. Last.fm — только дополнительный модуль: разовый импорт накопленной истории и, по желанию, постоянная синхронизация для тех, кто продолжает им пользоваться (§4).
+Плеер, браузерное расширение или приложение-скробблер **само отправляет прослушивания в Scrobb**. Основные клиенты — **свои**: расширение браузера и десктоп-приложение (§18), привязанные к аккаунту без ручных токенов. Сторонние скробблеры подключаются по API-токену пользователя (§3.3). Last.fm — только дополнительный модуль: разовый импорт накопленной истории и, по желанию, постоянная синхронизация для тех, кто продолжает им пользоваться (§4).
 
 Почему так:
 - **Last.fm заблокирован в РФ** (R1): без обхода блокировки новые скробблы туда не доходят. Строить ядро на опросе Last.fm — значит строить его на источнике, который у основной аудитории не работает.
@@ -866,11 +864,12 @@ CREATE TABLE reserved_usernames (name citext PRIMARY KEY, reason text);
 
 ### 3.2 Протоколы
 
-Свой протокол не изобретаем: принимаем то, что уже умеют существующие клиенты.
+Для **своих клиентов** — родной API (§18.3): поштучные ответы, серверная конфигурация, привязка устройства. Для **сторонних** свой протокол не изобретаем: принимаем то, что они уже умеют.
 
 | Протокол | Эндпоинты Scrobb | Статус |
 |---|---|---|
-| **ListenBrainz-совместимый JSON API** ([core](https://listenbrainz.readthedocs.io/en/latest/users/api/core.html), [JSON](https://listenbrainz.readthedocs.io/en/latest/users/json.html)) | База `https://scrobb.ru/apis/listenbrainz/1/`: `POST submit-listens` (`listen_type` = `single` \| `playing_now` \| `import`), `GET validate-token`, `POST playing-now/delete`. Заголовок `Authorization: Token <токен>` | **MVP**, основной |
+| **Родной API Scrobb** (только свои клиенты, §18.3) | `GET /api/v1/scrobble/config`, `POST`/`DELETE /api/v1/scrobble/now-playing`, `POST /api/v1/scrobble/listens` (до 50 в пачке, поштучный результат). Заголовок `Authorization: Bearer <токен устройства>` | **MVP**, основной для своих клиентов |
+| **ListenBrainz-совместимый JSON API** ([core](https://listenbrainz.readthedocs.io/en/latest/users/api/core.html), [JSON](https://listenbrainz.readthedocs.io/en/latest/users/json.html)) | База `https://scrobb.ru/apis/listenbrainz/1/`: `POST submit-listens` (`listen_type` = `single` \| `playing_now` \| `import`), `GET validate-token`, `POST playing-now/delete`. Заголовок `Authorization: Token <токен>` | **MVP**, основной для сторонних клиентов |
 | **Last.fm / Audioscrobbler 2.0-совместимый** (подмножество [Scrobbling 2.0](https://www.last.fm/api/scrobbling)) | `https://scrobb.ru/2.0/`: `auth.getMobileSession` (логин = наш @username, пароль = API-токен) → `sk`; `track.updateNowPlaying`; `track.scrobble` (до **50** скробблов в пакете, [track.scrobble](https://www.last.fm/api/show/track.scrobble)). Ответы — в формате Last.fm (XML или JSON по `format`) | **MVP**, если хватит времени, иначе сразу после. Для клиентов, которые умеют только «Last.fm-совместимый сервер» (GNU FM) |
 | Audioscrobbler 1.2 (handshake) | — | Не планируем: устаревший протокол. Например, модуль VLC 3 формирует handshake с жёстко заданным `http://` ([исходник](https://github.com/videolan/vlc/blob/3.0.x/modules/misc/audioscrobbler.c)), то есть токен уйдёт без TLS |
 
@@ -879,6 +878,8 @@ CREATE TABLE reserved_usernames (name citext PRIMARY KEY, reason text);
 **Особенности 2.0-совместимого эндпоинта.** Клиент подписывает запросы (`api_sig`) секретом *своего* приложения, а этот секрет нам неизвестен. Поэтому подпись не проверяем: аутентификация — только по нашему `sk`, `api_key` принимаем любой (так поступают и другие совместимые серверы — **не проверено** в деталях). Для Pano Scrobbler, по словам его автора, нужны ровно `auth.getMobileSession`, `track.updateNowPlaying` и `track.scrobble` ([#470](https://github.com/kawaiiDango/pano-scrobbler/issues/470)).
 
 ### 3.3 Клиенты, которые умеют свой адрес сервера
+
+Сторонние клиенты — второй, поддерживаемый путь рядом со своими (§18). Многие из них — ещё и кандидаты в образцы или основу для своих клиентов (лицензии — §18.13).
 
 | Клиент | Платформа | Как направить в Scrobb | Источник |
 |---|---|---|---|
@@ -897,8 +898,9 @@ CREATE TABLE reserved_usernames (name citext PRIMARY KEY, reason text);
 ### 3.4 Токены и подключение клиента
 
 - **Токен на устройство или клиент**, создаётся в «Настройки → Приложения» (§9.9) и показывается **один раз**. Формат — `scr_` + 32 случайных байта (base62). Храним только `sha256` и первые символы для списка (`api_tokens`, §9.9). Область — `listens:write`. Отзыв моментальный. `last_used_at` и `last_client` (`submission_client` из запроса) — чтобы пользователь видел, какое устройство пишет.
+- **Свои клиенты** получают токен не вручную, а через привязку устройства (OAuth 2.0 Device Authorization Grant, §18.4): `api_tokens.kind = 'device'`, области `listens:write` и `profile:read`. В «Приложениях» такие токены показываются как устройства («Chrome · Windows») с версией клиента.
 - Для 2.0-совместимого протокола `auth.getMobileSession` выдаёт отдельный `sk`, привязанный к тому же токену (`api_tokens.kind = 'as2_session'`, `parent_id`). Отзыв токена отзывает и сессии.
-- **Онбординг «Как подключить плеер»** — страница `/settings/apps/connect/{client}` для каждого клиента из §3.3: короткая инструкция со скриншотами, кнопки «скопировать URL» и «скопировать токен» (URL уже в нужной клиенту форме, например с `/submit-listens` для Web Scrobbler и foobar2000), затем **«Проверить подключение»**: страница ждёт первого `playing_now` или скроббла с этим токеном и показывает «Готово, видим: <трек>». Первым экраном после регистрации предлагаем «Подключить плеер», а «Импортировать историю из Last.fm» — вторым, необязательным шагом.
+- **Онбординг «Как подключить плеер»** — страница `/settings/apps/connect/{client}` для каждого клиента из §3.3: короткая инструкция со скриншотами, кнопки «скопировать URL» и «скопировать токен» (URL уже в нужной клиенту форме, например с `/submit-listens` для Web Scrobbler и foobar2000), затем **«Проверить подключение»**: страница ждёт первого `playing_now` или скроббла с этим токеном и показывает «Готово, видим: <трек>». Первым экраном после регистрации предлагаем «Установить Scrobb для браузера» (или «для компьютера», если пользователь пришёл с десктопа, §18), ниже — «Другой плеер или скробблер» (эти страницы); «Импортировать историю из Last.fm» — вторым, необязательным шагом.
 - Приём, валидация, лимиты и запись — алгоритм §11.1.
 
 ---
@@ -995,8 +997,8 @@ class ListenEvent:
     loved: bool | None = None
     # внешние id: {"mb_recording": "...", "mb_artist": "...", "lastfm_url": "...", "isrc": "...", "yandex": "..."}
     ext_ids: dict[str, str] = field(default_factory=dict)
-    source: str = "scrobb_lb"           # scrobb_lb | scrobb_as2 | lastfm | …
-    client: str | None = None           # submission_client от клиента (Web Scrobbler, Pano Scrobbler…)
+    source: str = "scrobb_lb"           # scrobb_lb | scrobb_as2 | scrobb_native | lastfm | …
+    client: str | None = None           # submission_client / User-Agent клиента (Scrobb Extension, Web Scrobbler, Pano Scrobbler…)
     token_id: int | None = None         # какой токен/устройство прислало (только push)
 
 @dataclass(slots=True)
@@ -1018,7 +1020,7 @@ class Capability(Flag):
     OAUTH = auto()          # привязка через OAuth/redirect
 
 class ListeningSourceProvider(Protocol):
-    code: str                           # "scrobb_lb", "scrobb_as2", "lastfm", "yandex", ...
+    code: str                           # "scrobb_lb", "scrobb_as2", "scrobb_native", "lastfm", "yandex", ...
     capabilities: Capability
 
     async def start_connect(self, user_id: int, redirect_uri: str) -> str: ...     # URL для redirect (или "" для push)
@@ -1063,7 +1065,7 @@ class ProviderRegistry:
 - `GET /apis/listenbrainz/1/validate-token`;
 - `POST /apis/listenbrainz/1/playing-now/delete`.
 
-Второй вход — подмножество Last.fm Scrobbling 2.0 (`/2.0/`: `auth.getMobileSession`, `track.updateNowPlaying`, `track.scrobble`). Так уже работают Maloja и Koito. Через Web Scrobbler и Pano Scrobbler в Scrobb попадают прослушивания из Яндекс Музыки, VK, Звука и КИОН без неофициальных API (подробнее — в [music-services-ru.md](music-services-ru.md)).
+Второй вход — подмножество Last.fm Scrobbling 2.0 (`/2.0/`: `auth.getMobileSession`, `track.updateNowPlaying`, `track.scrobble`). Так уже работают Maloja и Koito. Третий, основной для своих клиентов, — родной API (`/api/v1/scrobble/*`, §18.3); все три входа сходятся в один `IngestService`. Через Web Scrobbler и Pano Scrobbler в Scrobb попадают прослушивания из Яндекс Музыки, VK, Звука и КИОН без неофициальных API (подробнее — в [music-services-ru.md](music-services-ru.md)).
 
 ---
 
@@ -1078,6 +1080,7 @@ class ProviderRegistry:
 | БД | **PostgreSQL 16** с декларативным секционированием `listens` по месяцам (pg_partman), `pg_trgm`, `citext` | Один движок для OLTP и агрегатов, оконные функции для стриков (gaps-and-islands), `ON CONFLICT` для идемпотентности. TimescaleDB — опция позже |
 | Кэш / лидерборды / rate limit / брокер | **Valkey** — два экземпляра: очередь и кэш (§7.1) | Token bucket для лимитов на токены клиентов (§11.1), Last.fm и MusicBrainz (у MusicBrainz жёстко ≤1 req/s с IP и обязательный User-Agent, [rate limiting](https://musicbrainz.org/doc/MusicBrainz_API/Rate_Limiting)), sorted sets для лидербордов, now playing с TTL, брокер очереди. **Почему Valkey, а не Redis:** в 2024 году Redis сменил лицензию BSD на RSALv2 / SSPLv1 (с версии 7.4, [анонс](https://redis.io/blog/redis-adopts-dual-source-available-licensing/)), в Redis 8 добавлен вариант AGPLv3 ([анонс](https://redis.io/blog/agplv3/)). Valkey — форк Redis под эгидой Linux Foundation, лицензия BSD 3-Clause, совместимый протокол ([Linux Foundation](https://www.linuxfoundation.org/press/linux-foundation-launches-open-source-valkey-community), [valkey.io](https://valkey.io/)); подробнее — §6.3 |
 | Фронтенд | **Next.js (App Router, TypeScript)**, TanStack Query, графики — ECharts или Recharts, UI — Tailwind + shadcn/ui | SSR для публичных профилей (превью ссылок, SEO), большая экосистема. Tailwind и shadcn/ui настраиваются на дизайн-токены (CSS-переменные) из §10, цвета серий графиков берутся из тех же токенов |
+| Свои клиенты-скробблеры (§18.12, предложение) | Расширение: **TypeScript + WebExtension Manifest V3**, сборка WXT, Chrome/Chromium и Firefox. Десктоп: **Tauri 2** (Rust: SMTC через `windows`, MPRIS через `mpris`, macOS через mediaremote-adapter), общее ядро `scrobbler-core` на TypeScript; альтернатива — Electron | Тот же TypeScript, что во фронтенде, API-клиент из OpenAPI; маленький установщик и подписанные обновления у Tauri |
 | Авторизация | Свои сессии (httpOnly cookie, `user_sessions`, §17.4) + OAuth-клиенты **VK ID** (OAuth 2.1 + PKCE, [docs](https://id.vk.com/about/business/go/docs/ru/vkid/latest/vk-id/connection/start-integration/auth-without-sdk/auth-without-sdk-web)), **Яндекс ID** ([docs](https://yandex.com/dev/id/doc/ru/register-auth)), вход по телефону (SMS-провайдер РФ) | Соответствует 149-ФЗ ст. 8 ч. 10 (R3). Telegram — только как канал уведомлений, не для входа. Email — канал связи; вход по email и паролю (argon2id) — только под флагом после ответа юриста (§17.1) |
 | Деплой | **Docker Compose** на VPS или в облаке **в РФ** (Selectel / Yandex Cloud / VK Cloud / Timeweb — выбрать). Сервисы: `api`, `worker`, `scheduler`, `web`, `bot` (Telegram, §13), `postgres`, `valkey` (два экземпляра — очередь и кэш, §7.1), `caddy` (TLS). Опционально — egress-прокси за пределами РФ только для `ws.audioscrobbler.com` (R1/R4) | Один человек поднимет всё за вечер. Managed PostgreSQL у того же провайдера снимает бэкапы и PITR |
 | CI/CD | **GitHub Actions**: lint (ruff, eslint), тесты (pytest + testcontainers-postgres), сборка образов → GHCR → деплой по SSH (`docker compose pull && up -d`), миграции Alembic отдельным шагом | Доступен в репозитории уже сейчас |
@@ -1201,6 +1204,8 @@ Prometheus, Grafana и GlitchTip (это ещё один PostgreSQL) лучше 
 | | Доля `duplicate` (§5.4) | Калибровка окна дедупликации |
 | | Бэклог `ingest_batch` | > 15 мин |
 | | Число токенов, приславших данные за сутки | Продуктовая метрика: «живые» подключения |
+| Свои клиенты (§18) | Доля прослушиваний по коннекторам и версиям клиента; доля `rejected` по коннектору | Всплеск по одному коннектору → сайт сменил вёрстку: отключить через `disabled_connectors`, выпустить исправление |
+| | Возраст приходящих прослушиваний (now − `listened_at`) | Рост → клиенты копят офлайн-очередь (сеть, `5xx`, `429`) |
 | Импорт и синхронизация Last.fm | p95 лага `now − last_success_at` по аккаунтам с `sync_enabled` (своя метрика) | > 1 ч |
 | | Доля активных аккаунтов с лагом > 2× их интервала опроса | > 5% |
 | | Загрузка token bucket Last.fm | > 80% устойчиво. **Важно:** это лимит Last.fm, а не железа. Влияет только на скорость импорта и синхронизации; помогает адаптивный опрос, перевод пользователей на прямую отправку (§3) или соглашение с Last.fm |
@@ -1485,7 +1490,7 @@ CREATE INDEX ON notifications (user_id, created_at DESC) WHERE read_at IS NULL;
 | **Уведомления** | Матрица «тип × канал» (in-app / email / Telegram); `security_alert` выключить нельзя. Отдельный блок «Рассылки на почту» — неотмеченные по умолчанию галочки «Еженедельная сводка» и «Новости Scrobb» (§17.6) | `user_preferences.notifications`, `email_consent_log` | MVP (in-app; email для `sync_problem` и безопасности; Telegram после привязки бота, §13.2); рассылки — later |
 | **Подключения** | Last.fm (необязательно): «Импортировать историю» и переключатель «Продолжать синхронизацию» (по умолчанию выключен, с подсказкой, что лучше направить клиента прямо в Scrobb); статус, «последняя синхронизация N мин назад», прогресс backfill, «Синхронизировать сейчас» (rate limit), «Отвязать» — с выбором, удалить ли импортированные данные (ToS п. 9.3 и право пользователя) | `external_accounts`, `sync_state` | MVP |
 | **Аккаунт** | Способы входа (VK ID, Яндекс ID, телефон), привязка и отвязка (минимум один должен остаться), email: привязка, подтверждение и смена (§17.2), пароль — если вход по паролю включён (§17.3), активные сессии и «выйти на всех устройствах» (§17.4), смена username, экспорт данных (JSON/CSV — `listens` + метаданные; асинхронно, ссылка на 24 ч), удаление аккаунта | `auth_identities`, `users`, `user_emails`, `user_sessions` | MVP: способы входа, email и сессии, удаление; экспорт — later (лучше рано) |
-| **Приложения** | **Главная вкладка этапа 1.** API-токены для Scrobble API (§3): создать (показ один раз, имя устройства), список с `last_used_at` и последним клиентом (`submission_client`: Web Scrobbler, Pano Scrobbler…), отозвать. Адреса для обоих протоколов с кнопкой «скопировать». Раздел **«Как подключить плеер»** — по странице на клиента из §3.3 с проверкой подключения (§3.4) | `api_tokens` | **MVP** |
+| **Приложения** | **Главная вкладка этапа 1.** Сверху — «Scrobb для браузера» и «Scrobb для компьютера» (§18) и список привязанных устройств с версией клиента. Ниже — API-токены для сторонних клиентов (§3): создать (показ один раз, имя устройства), список с `last_used_at` и последним клиентом (`submission_client`: Web Scrobbler, Pano Scrobbler…), отозвать. Адреса для обоих протоколов с кнопкой «скопировать». Раздел **«Как подключить плеер»** — по странице на клиента из §3.3 с проверкой подключения (§3.4) | `api_tokens`, `device_auth_requests` | **MVP** |
 
 **Аватар и баннер.** S3-совместимое объектное хранилище **в РФ** (Yandex Object Storage / Selectel / VK Cloud — у того же провайдера, что и БД). Фото пользователя — его ПДн, поэтому только в РФ (R4).
 
@@ -1541,13 +1546,15 @@ CREATE TABLE user_preferences (
 CREATE TABLE api_tokens (
   id           bigserial PRIMARY KEY,
   user_id      bigint NOT NULL REFERENCES users ON DELETE CASCADE,
-  kind         text NOT NULL DEFAULT 'api',  -- 'api' | 'as2_session' (sk для /2.0/, §3.4)
+  kind         text NOT NULL DEFAULT 'api',  -- 'api' | 'as2_session' (sk для /2.0/, §3.4) | 'device' (свой клиент, §18.4)
   parent_id    bigint REFERENCES api_tokens ON DELETE CASCADE,  -- для as2_session: исходный API-токен
   name         text NOT NULL,
   token_prefix text NOT NULL,           -- первые 8 символов, для показа в списке
   token_hash   bytea UNIQUE NOT NULL,   -- sha256(token); сам токен не храним
   scopes       text[] NOT NULL DEFAULT '{listens:write}',
   last_used_at timestamptz, last_client text,
+  client_kind    text,                 -- 'extension' | 'desktop' (только kind = 'device')
+  client_version text,                 -- последняя версия клиента: min_client_version и поддержка (§18.3)
   created_at   timestamptz NOT NULL DEFAULT now(), revoked_at timestamptz
 );
 CREATE TABLE favorites (               -- «любимое» и закладки
@@ -1626,7 +1633,7 @@ API: `GET /api/v1/me/recommendations?type=all|artists|albums|tracks&cursor=`, `P
 
 | MVP | Later |
 |---|---|
-| Шапка профиля со счётчиками и стриком; Recent Tracks с автообновлением поллингом; топы артистов, альбомов и треков с периодами `7d…all` и барами; «на этой неделе» + мини-графики + недельный отчёт; Library (артисты, треки); Following/Followers; дружеские лидерборды (неделя, месяц, всё время, §11.7); Loved (свои лайки + импорт из Last.fm); меню аккаунта; in-app уведомления (follower, achievement, streak_at_risk, sync_problem, client_connected); настройки: профиль+аватар, таймзона, приватность, отображение, email и сессии (§17), **«Приложения» (токены) и «Как подключить плеер»**, импорт Last.fm (необязательно), выбор и смена @username, привязка Telegram-бота, способы входа, удаление аккаунта | Баннер; фото артистов; share-картинки; месячные и годовые отчёты, «Итоги года»; часы прослушивания; ссылки на RU-сервисы; email-сводки и новости (§17.12); SSE; экспорт данных; рекомендации (этап 2, начиная с rediscover); Shoutbox, сообщения; Events |
+| Шапка профиля со счётчиками и стриком; Recent Tracks с автообновлением поллингом; топы артистов, альбомов и треков с периодами `7d…all` и барами; «на этой неделе» + мини-графики + недельный отчёт; Library (артисты, треки); Following/Followers; дружеские лидерборды (неделя, месяц, всё время, §11.7); Loved (свои лайки + импорт из Last.fm); меню аккаунта; in-app уведомления (follower, achievement, streak_at_risk, sync_problem, client_connected); настройки: профиль+аватар, таймзона, приватность, отображение, email и сессии (§17), **«Приложения» (свои клиенты и устройства, токены) и «Как подключить плеер»**, страница `/apps` (§18.11), импорт Last.fm (необязательно), выбор и смена @username, привязка Telegram-бота, способы входа, удаление аккаунта | Баннер; фото артистов; share-картинки; месячные и годовые отчёты, «Итоги года»; часы прослушивания; ссылки на RU-сервисы; email-сводки и новости (§17.12); SSE; экспорт данных; рекомендации (этап 2, начиная с rediscover); Shoutbox, сообщения; Events |
 
 ---
 
@@ -1746,7 +1753,7 @@ API: `GET /api/v1/me/recommendations?type=all|artists|albums|tracks&cursor=`, `P
 
 ### 11.1 Приём скробблов от клиентов (Scrobble API)
 
-**Вход:** HTTP-запрос на `/apis/listenbrainz/1/submit-listens` или `/2.0/` (§3.2); заголовок `Authorization: Token …` или `sk`.
+**Вход:** HTTP-запрос на `/api/v1/scrobble/*` (родной API своих клиентов, §18.3), `/apis/listenbrainz/1/submit-listens` или `/2.0/` (§3.2); заголовок `Authorization: Bearer …` (токен устройства), `Token …` или `sk`.
 
 **Шаги:**
 1. **Аутентификация.** `sha256(token)` → `api_tokens` (кэш в Valkey на 60 с, сбрасывается при отзыве). Нет или отозван → `401`. `last_used_at` и `last_client` обновляются не чаще раза в минуту.
@@ -1757,10 +1764,10 @@ API: `GET /api/v1/me/recommendations?type=all|artists|albums|tracks&cursor=`, `P
 6. **Правило скроббла.** Общепринятое правило: трек длиннее 30 секунд и прослушан наполовину или 4 минуты — что наступит раньше ([Last.fm](https://www.last.fm/api/scrobbling); у [ListenBrainz](https://listenbrainz.readthedocs.io/en/latest/users/api/core.html) — «половина или 4 минуты»). Проверять его — задача клиента. Сервер отбрасывает только явные нарушения, если клиент прислал данные: `duration_ms < 30 000` или `duration_played < min(duration/2, 240 с)`.
 7. **`playing_now`.** В `listens` не пишется: `SET np:{user} <json> EX ttl`, где `ttl` = оставшаяся длительность трека + 30 с (если она неизвестна — 10 мин). Публикуется в канал живых обновлений профиля и бота. `hide_now_playing` (§8.3) применяется при чтении. Скроббл того же трека или `playing-now/delete` очищает ключ.
 8. **Сопоставление** — общий `IngestService` (§5.3): `match_key` → `track_aliases` (горячий кэш алиасов в Valkey) → `track_id`; MBID из `additional_info` → `external_ids`; новые треки → `enrich`.
-9. **Идемпотентная запись.** Тот же `INSERT … ON CONFLICT (user_id, played_at, alias_id) DO NOTHING RETURNING …` (§2.4) с `source = 1 | 2` (`scrobb_lb` / `scrobb_as2`) и `token_id`. Повторная отправка после таймаута не создаёт дубля. Межисточниковые дубли (тот же трек уже пришёл из импорта Last.fm) — по окну времени, §5.4.
+9. **Идемпотентная запись.** Тот же `INSERT … ON CONFLICT (user_id, played_at, alias_id) DO NOTHING RETURNING …` (§2.4) с `source = 1 | 2 | 4` (`scrobb_lb` / `scrobb_as2` / `scrobb_native`) и `token_id`. Повторная отправка после таймаута не создаёт дубля. Межисточниковые дубли (тот же трек уже пришёл из импорта Last.fm) — по окну времени, §5.4.
 10. **Синхронно или фоном.** `single` и небольшие пакеты (≤ 100) пишутся в транзакции запроса: matcher + вставка + инкременты счётчиков + outbox. Большой `import` сохраняется в `ingest_batches` (§2.3: `user_id`, `token_id`, `payload`, `status`), сразу получает `200`, а разбирается задачей `ingest_batch:{id}` той же логикой.
 11. **События.** В той же транзакции — `ListensImported{user_id, source, inserted, min_played_at, max_played_at, local_dates}` в outbox. Дальше всё как для импорта: стрики (§11.3), топы с дебаунсом (§11.4), достижения (§11.5), лидерборды (§11.7). Живой скроббл — повод для `StreakUpdated` и мгновенного «стрик продлён» в интерфейсе.
-12. **Ответ:** ListenBrainz — `{"status": "ok"}`; 2.0 — `<scrobbles accepted="N" ignored="M">` с `ignoredMessage` для отклонённых.
+12. **Ответ:** родной API — поштучные результаты `{client_id, status, reason?}` (§18.3); ListenBrainz — `{"status": "ok"}`; 2.0 — `<scrobbles accepted="N" ignored="M">` с `ignoredMessage` для отклонённых.
 
 **Выход:** новые строки `listens`; now playing в Valkey; события в outbox; метрики `ingest_requests_total{protocol,status}`, `ingest_listens_total{result=accepted|duplicate|rejected}`, латентность.
 
@@ -2302,7 +2309,7 @@ CREATE TABLE notification_deliveries (
 
 **Входит:**
 1. Регистрация и вход: VK ID, Яндекс ID (+ телефон, если успеваем); выбор @username (§2.5), профиль, таймзона.
-2. **Собственный приём скробблов (ядро, §3, §11.1):** ListenBrainz-совместимый `submit-listens` (`single`, `playing_now`, `import`) и `validate-token`; API-токены во вкладке «Приложения»; страницы «Как подключить плеер» минимум для Web Scrobbler, Pano Scrobbler, rescrobbled, foobar2000 и Navidrome с проверкой подключения; now playing; лимиты, валидация, идемпотентность, дедупликация (§5.4). Last.fm 2.0-совместимый `/2.0/` — если успеваем, иначе первым пунктом после MVP.
+2. **Собственный приём скробблов (ядро, §3, §11.1):** родной API для своих клиентов и привязка устройства (§18.3, §18.4); ListenBrainz-совместимый `submit-listens` (`single`, `playing_now`, `import`) и `validate-token`; API-токены во вкладке «Приложения»; страницы «Как подключить плеер» минимум для Web Scrobbler, Pano Scrobbler, rescrobbled, foobar2000 и Navidrome с проверкой подключения; now playing; лимиты, валидация, идемпотентность, дедупликация (§5.4). Last.fm 2.0-совместимый `/2.0/` — если успеваем, иначе первым пунктом после MVP.
 3. **Импорт из Last.fm (необязательно, §4):** привязка через web auth, backfill с прогрессом («импортировано 34 000 из 94 613»). Постоянная синхронизация (incremental + reconcile) — переключатель, по умолчанию выключен.
 4. История прослушиваний; топ артистов, альбомов и треков за периоды `7d…all` (§9.1); график по дням.
 5. Стрики (порог N = 1), 10–15 базовых достижений с ретроактивной выдачей.
@@ -2312,8 +2319,9 @@ CREATE TABLE notification_deliveries (
 9. Экраны профиля, меню аккаунта, in-app уведомления и настройки — по таблице приоритетов §9.12.
 10. Telegram-бот: привязка, `/now`, `/stats`, `/top`, `/streak` и уведомления (§13.9).
 11. **Email (§17.12):** привязка, подтверждение и смена адреса (с уведомлением старого); сессии сайта и «выйти везде»; уведомления безопасности; письмо `sync_problem`; SPF/DKIM/DMARC, обработка bounce и жалоб. Сброс пароля и вход по паролю — реализованы, включаются флагом после ответа юриста (§16, п. 9).
+12. **Свои клиенты-скробблеры (предложение, §18.14):** расширение браузера для Chrome/Chromium и Firefox с коннекторами Яндекс Музыки, VK Музыки, Звука и YouTube Music, офлайн-очередью и привязкой к аккаунту. Десктоп-приложение (Windows, Linux) — сразу после MVP, во второй волне этапа 1.
 
-**Не входит:** email-сводки и новости (later, §17.12), Audioscrobbler 1.2, собственные плагины к плеерам (§16), провайдеры Яндекса, VK и Звука, лента активности, рекомендации (этап 2, §9.10), комментарии и сообщения, desktop-клиент, видео и Steam, ручное редактирование и слияние треков (только в админке).
+**Не входит:** десктоп-приложение (вторая волна этапа 1 — сразу после MVP, §18.14), macOS-версия десктопа и Safari (later), email-сводки и новости (later, §17.12), Audioscrobbler 1.2, плагины к отдельным плеерам — AIMP, VLC (§16), провайдеры Яндекса, VK и Звука, лента активности, рекомендации (этап 2, §9.10), комментарии и сообщения, видео и Steam, ручное редактирование и слияние треков (только в админке).
 
 ---
 
@@ -2322,6 +2330,7 @@ CREATE TABLE notification_deliveries (
 - ПДн (идентификаторы входа, телефон, email, таймзона, username Last.fm, история прослушиваний, данные клиентов-скробблеров — `submission_client`, устройство) хранятся только в РФ (R4). Нужны политика обработки ПДн, согласие при регистрации и уведомление РКН об обработке (и о трансграничной передаче, если она есть).
 - Токены провайдеров (будущие Yandex/Zvuk) шифруются на уровне приложения (`secret_enc`, ключ вне БД). Session key Last.fm не храним.
 - **API-токены клиентов** (§3.4) храним только как `sha256`, показываем один раз; Scrobble API — только HTTPS, токен — в заголовке, а не в URL (поэтому не поддерживаем Audioscrobbler 1.2, §3.2). В логах токены маскируются. Подозрительная активность по токену (лимиты, всплески, §11.1) → уведомление владельцу и возможность отозвать токен одним нажатием.
+- **Свои клиенты (§18.9):** отправляют только данные о треке — без адресов страниц, истории браузера и списка процессов; расширение получает доступ только к сайтам плееров; токен устройства — в хранилище секретов ОС или `storage.local`, `device_code` — только как `sha256`; обновления десктопа подписаны; телеметрии по умолчанию нет.
 - Telegram: `telegram_user_id` и `chat_id` — ПДн в РФ; вебхук проверяется по `secret_token` (§13.9).
 - **Email и сессии (§17.11):** адреса, журнал писем и сессии — ПДн в РФ; провайдер писем — обработчик по поручению в РФ; одноразовые ссылки и cookie сессий хранятся только как `sha256`; пароли (если вход по паролю включат) — argon2id; после сброса пароля отзываются все сессии сайта, но не API-токены клиентов (§17.3); suppression-список хранит HMAC адреса, а не сам адрес.
 - Согласие на обработку ПДн — отдельным документом (152-ФЗ ст. 9 ч. 1 в ред. 156-ФЗ, с 01.09.2025), согласие на рекламные рассылки — отдельно от него (38-ФЗ ст. 18, §17.6).
@@ -2332,7 +2341,7 @@ CREATE TABLE notification_deliveries (
 
 **Приём скробблов и клиенты**
 1. **Какие клиенты официально поддерживать первыми** и для каких писать страницы «Как подключить плеер» (предложение: Web Scrobbler, Pano Scrobbler, rescrobbled, foobar2000, Navidrome). Проверить каждого на нашем API до запуска, в том числе нужна ли клиенту `GET validate-token` или другие эндпоинты.
-2. **Писать ли свои плагины или приложения**: AIMP и VLC (свой сервер не поддерживают или поддерживают только Audioscrobbler 1.2 без TLS, §3.3), свой Android-скробблер, iOS (чтение чужих плееров невозможно). Или ждать и помогать авторам существующих клиентов.
+2. **Свои клиенты:** расширение и десктоп решены (§18, вопросы — п. 38–44). Открыто: плагины к AIMP и VLC (свой сервер не поддерживают или поддерживают только Audioscrobbler 1.2 без TLS, §3.3) — или их закроет десктоп через медиасессии ОС; свой Android-скробблер; iOS (чтение чужих плееров невозможно).
 3. Last.fm 2.0-совместимый эндпоинт: какие ещё методы, кроме `auth.getMobileSession`, `track.updateNowPlaying` и `track.scrobble`, ждут реальные клиенты; как они реагируют на непроверяемый `api_sig`.
 4. Окно межисточниковой дедупликации (90 с?) и пороги лимитов на токен — откалибровать на реальных данных (§5.4, §11.1).
 
@@ -2384,6 +2393,15 @@ CREATE TABLE notification_deliveries (
 35. Доверять ли адресу, который вернули VK ID / Яндекс ID с пометкой «подтверждён», или всегда подтверждать своим письмом (предложение — всегда своим, §17.2).
 36. Пороги прогрева и стоп-пороги (hard bounce > 2%, жалобы > 0,1%) — взять из требований выбранного провайдера и почтовых сервисов, сейчас не проверено (§17.7).
 37. Удалять ли через 30 дней неподтверждённые аккаунты, созданные по email (если такая регистрация появится), и что делать с уже накопленными скробблами (§17.2).
+
+**Свои клиенты (§18)**
+38. **Магазины расширений из РФ:** можно ли оплатить регистрацию в Chrome Web Store и публиковаться; доступны ли установки пользователям из РФ в Chrome Web Store, Firefox Add-ons, Edge Add-ons и каталоге Opera; ставит ли текущий Яндекс Браузер расширения оттуда (§18.11). Проверить до начала разработки.
+39. **Подпись кода:** где купить сертификат Authenticode для Windows из РФ и во что он обойдётся; выпускать ли первые версии без подписи (с предупреждением SmartScreen); Apple Developer Program для macOS (§18.11).
+40. **Web Scrobbler:** встраивать его каркас и коннекторы в своё расширение или делать полный форк; связаться ли с командой проекта, чтобы договориться об обмене исправлениями коннекторов (§18.13).
+41. **Лицензия своих клиентов:** открытый код под MIT (доверие: видно, что история браузера не собирается), под GPL-3.0 (тогда можно брать код Pano Scrobbler и rescrobbled) или закрытый (§18.13).
+42. **Tauri или Electron** для десктопа; надёжно ли работает JS-ядро в скрытом окне Tauri — проверить прототипом (§18.12).
+43. **macOS:** поддерживать ли через mediaremote-adapter (обход ограничения macOS 15.4+, Apple может закрыть) и когда (§18.6).
+44. Набор коннекторов MVP и порядок; скробблить ли видео-сайты; названия клиентов в магазинах (§18.5, §18.14).
 
 ---
 
@@ -2451,7 +2469,7 @@ CREATE TABLE notification_deliveries (
 
 - **Сессии сайта** — таблица `user_sessions` (§17.10): случайный токен в cookie `httpOnly; Secure; SameSite=Lax`, в БД — только `sha256`; кэш проверки — в Valkey на 60 с со сбросом при отзыве (как у API-токенов, §11.1). Срок — 30 дней со скользящим продлением. Поле `authenticated_at` — время последней полной проверки личности: смена адреса, пароля, способов входа и удаление аккаунта требуют, чтобы оно было не старше 15 минут, иначе — повторный вход.
 - В «Настройки → Аккаунт» — список активных сессий (устройство по `User-Agent`, IP, последний визит) и кнопка «Выйти на всех устройствах».
-- **Уведомления безопасности** (`security_alert`, §9.8) — всегда включены, отключить нельзя: in-app + email (если адрес подтверждён) + Telegram (если привязан). Поводы в MVP: `password_changed`, `email_change_requested` / `email_changed` (на старый адрес), `login_method_linked` / `login_method_unlinked`, `telegram_linked`, `account_deletion_requested`. Later: вход с нового устройства. В письме: что произошло, когда (в TZ пользователя), IP и браузер, и ссылка «Это был не я» (сброс пароля, отзыв сессий, связь с поддержкой).
+- **Уведомления безопасности** (`security_alert`, §9.8) — всегда включены, отключить нельзя: in-app + email (если адрес подтверждён) + Telegram (если привязан). Поводы в MVP: `password_changed`, `email_change_requested` / `email_changed` (на старый адрес), `login_method_linked` / `login_method_unlinked`, `device_linked` (привязан свой клиент, §18.4), `telegram_linked`, `account_deletion_requested`. Later: вход с нового устройства. В письме: что произошло, когда (в TZ пользователя), IP и браузер, и ссылка «Это был не я» (сброс пароля, отзыв сессий, связь с поддержкой).
 
 ### 17.5 Категории писем и потоки
 
@@ -2644,3 +2662,190 @@ CREATE TABLE email_consent_log (          -- доказательство сог
 - **MVP:** привязка и подтверждение адреса, повторная отправка, смена адреса с уведомлением старого и отменой; сессии сайта и «выйти везде»; уведомления безопасности (§17.4); служебные письма `sync_problem` и «спасибо за донат» (когда запущены донаты, §12.3); сброс пароля и вход по паролю — **реализованы, но включаются флагом только после ответа юриста** (§16, п. 9); SPF, DKIM, DMARC (`p=none`) на `mail.scrobb.ru`; вебхуки bounce и жалоб, suppression; шаблоны plain-text + HTML; перехватчик писем для разработки.
 - **Этап 2:** письма об оплате Pro и `pro_expiring` (вместе с Pro, §12.4).
 - **Later:** еженедельная сводка (`weekly_digest`) и новости (`news`) на `news.scrobb.ru` с opt-in и one-click отпиской, прогрев потока; DMARC `reject`; уведомление о входе с нового устройства; выделенный IP.
+
+---
+
+## 18. Собственные клиенты-скробблеры: расширение браузера и десктоп-приложение
+
+> Статус: **предложение** (решение Ивана от 04.10.2026: свои клиенты — на этапе 1 и основные; сторонние скробблеры — поддерживаемый второй путь). Детали — черновик, проверяются прототипом. Протокол — §18.3, алгоритм приёма — §11.1, план — §18.14.
+
+### 18.1 Зачем и как соотносится со сторонними клиентами
+
+- **Свои клиенты — основной путь подключения.** Пользователь ставит «Scrobb для браузера» или «Scrobb для компьютера», нажимает «Войти» — и всё: без копирования URL и токенов, без выбора «Custom ListenBrainz» в чужих настройках (§3.4). Это главный барьер онбординга сторонних клиентов.
+- **Что даёт свой клиент:** правила скроббла и обновления под нашим контролем; коннекторы, которые чиним сами и в первую очередь для сервисов РФ; родной протокол с поштучными ответами и серверной конфигурацией (§18.3); понятная диагностика («коннектор Звука сломан» вместо «токен молчит»); единый стиль и язык.
+- **Сторонние скробблеры остаются** (§3.2–§3.3): ListenBrainz- и Last.fm 2.0-совместимые эндпоинты, страницы «Как подключить плеер», проверка подключения. Они нужны для Android (Pano Scrobbler), медиасерверов (Navidrome), foobar2000 и всех, кто уже настроил свой клиент. Совместимые эндпоинты поддерживаются в текущем объёме, новые возможности появляются в родном API.
+- **Чего свои клиенты на этапе 1 не делают:** не показывают статистику (только «сейчас играет», счётчик за сегодня и ссылку на профиль), не редактируют историю, не импортируют Last.fm — всё это на сайте.
+
+### 18.2 Общая схема клиента
+
+Оба клиента устроены одинаково: **источник** (откуда узнаём, что играет) → **ядро** (правила скроббла, очередь, API-клиент) → **родной API** Scrobb.
+
+| Слой | Расширение | Десктоп |
+|---|---|---|
+| Источник | Content scripts с коннектором на каждый сайт (§18.5) | Медиасессии ОС: SMTC, MPRIS, Now Playing (§18.6) |
+| Нормализованное событие | `PlaybackState {player_id, connector, track, artist, album?, album_artist?, duration_ms?, position_ms?, is_playing, unique_id?, is_ad?}` | то же |
+| Ядро | Общий TypeScript-пакет `scrobbler-core`: конечный автомат воспроизведения, правила скроббла (§18.7), очередь (§18.8), API-клиент, сгенерированный из OpenAPI | то же (§18.12) |
+| Хранилище | `IndexedDB` (очередь), `storage.local` (токен, настройки) | SQLite (очередь), хранилище секретов ОС (токен) |
+| Интерфейс | Всплывающее окно: «сейчас играет», «отправлено / в очереди», переключатели сайтов, пауза скробблинга | Значок в трее с тем же меню + окно настроек |
+
+### 18.3 Родной протокол (native ingest API)
+
+Совместимые протоколы (§3.2) остаются для сторонних клиентов. Свои клиенты ходят в **родной API**: он описан в общем OpenAPI бэкенда и использует тот же `IngestService` и тот же алгоритм приёма (§11.1, шаги 2–11), но без ограничений чужих форматов.
+
+| Метод | Назначение |
+|---|---|
+| `GET /api/v1/scrobble/config` | Серверная конфигурация клиента: пороги правила скроббла (§18.7), размер пачки, `min_client_version` по типу клиента, список **отключённых коннекторов** (kill switch для сломанного сайта), интервалы. Ответ с `ETag`, клиент кэширует до 6 ч |
+| `POST /api/v1/scrobble/now-playing` | `{track, artist, album?, duration_ms?, position_ms?, source}` → `204`. Та же запись `np:{user}`, что и у `playing_now` (§11.1, шаг 7). `DELETE` того же адреса — сброс |
+| `POST /api/v1/scrobble/listens` | Пачка до **50** прослушиваний: `{listens: [{client_id, listened_at, track, artist, album?, album_artist?, duration_ms?, played_ms, mbids?, source}]}` → `200 {results: [{client_id, status: accepted\|duplicate\|rejected, reason?}]}` |
+| `GET /api/v1/me/summary` | Для меню клиента: @username, аватар, прослушиваний сегодня, стрик (область `profile:read`) |
+
+- **Аутентификация:** `Authorization: Bearer scr_…` — токен устройства (`api_tokens.kind = 'device'`, §18.4). Заголовок `User-Agent: ScrobbExtension/1.4.0 (chrome; win)` / `ScrobbDesktop/0.9.0 (windows)` пишется в `api_tokens.last_client` и `client_version`.
+- **`source`** — `{kind: "extension" | "desktop", connector: "yandex-music" | "smtc:<AppUserModelId>" | "mpris:<имя плеера>"}`. Хранится в `listens.additional_info` и нужен для диагностики и межисточниковой дедупликации (§5.4); в `listens.source` — новый код `4 = scrobb_native` (§2.3).
+- **`client_id`** — UUID, который клиент присваивает прослушиванию при постановке в очередь. Идемпотентность по-прежнему обеспечивает `ON CONFLICT (user_id, played_at, alias_id)` (§11.1, шаг 9): повтор той же пачки после таймаута даёт `duplicate`, а не дубль. `client_id` нужен только для поштучного ответа и в БД не хранится.
+- **`played_ms`** — сколько трек реально звучал. Сервер повторно проверяет правило скроббла (§11.1, шаг 6) и отклоняет нарушения с `reason = "below_threshold"`.
+- **Версии:** клиент ниже `min_client_version` получает `426 Upgrade Required` со ссылкой на обновление; очередь при этом не теряется.
+- Лимиты — те же token bucket, что в §11.1 (шаг 2), но на токен устройства.
+
+### 18.4 Вход: привязка устройства к аккаунту
+
+Вход в Scrobb — только через VK ID, Яндекс ID или телефон на сайте (R3, §6.1), поэтому клиент **не логинит пользователя сам** и не видит никаких паролей и кодов из SMS, а привязывается к сессии на сайте по схеме **OAuth 2.0 Device Authorization Grant** ([RFC 8628](https://www.rfc-editor.org/rfc/rfc8628)):
+
+1. Клиент вызывает `POST /api/v1/devices/authorize {client_kind, platform, client_version, device_name}` → `{device_code, user_code: "WDJB-MJHT", verification_uri: "https://scrobb.ru/link", verification_uri_complete, expires_in: 600, interval: 5}`.
+2. Клиент сам открывает `verification_uri_complete` (расширение — новой вкладкой, десктоп — системным браузером) и показывает `user_code` у себя.
+3. На сайте пользователь входит обычным способом и видит: «Подключить „Scrobb для Chrome“ на Windows? Код WDJB-MJHT» — код должен совпасть с кодом в клиенте (защита от фишинга чужим кодом). Нажимает «Подключить».
+4. Клиент опрашивает `POST /api/v1/devices/token {device_code}` не чаще `interval` и получает коды RFC 8628 (`authorization_pending`, `slow_down`, `access_denied`, `expired_token`) или `{access_token: "scr_…", token_id, name}`.
+5. Создаётся `api_tokens` с `kind = 'device'`, `scopes = {listens:write, profile:read}`, `client_kind`, `client_version`, именем «Chrome · Windows» (можно переименовать в «Приложения», §9.9). Уведомление безопасности о новом устройстве — `security_alert` (`device_linked`, §17.4).
+
+- **Хранение токена:** расширение — `storage.local` (не `storage.sync`: токен не должен уезжать на другие устройства через облако браузера); десктоп — хранилище секретов ОС (Windows Credential Manager, macOS Keychain, Linux Secret Service), не файл настроек.
+- Токен долгоживущий, без refresh-токена; отзыв — в «Приложения» (§9.9) или кнопкой «Выйти» в клиенте (`DELETE /api/v1/devices/current`). Как и у остальных API-токенов, сброс пароля его не отзывает (§17.3).
+- `user_code` — 8 символов из алфавита без похожих символов (как советует RFC 8628 §6.1), `device_code` хранится только как `sha256`; на ввод кода вручную — не больше 5 ошибок в минуту на сессию.
+- Таблица — `device_auth_requests` (DDL ниже, ER — §2.2).
+
+```sql
+-- api_tokens (§9.9): kind = 'device', плюс client_kind и client_version.
+CREATE TABLE device_auth_requests (     -- привязка устройства, RFC 8628 (§18.4)
+  id               bigserial PRIMARY KEY,
+  device_code_hash bytea UNIQUE NOT NULL,   -- sha256(device_code)
+  user_code        text  UNIQUE NOT NULL,   -- 8 символов, показывается пользователю
+  client_kind      text  NOT NULL,          -- extension | desktop
+  platform         text,
+  client_version   text,
+  status           text  NOT NULL DEFAULT 'pending',   -- pending | approved | denied | consumed
+  user_id          bigint REFERENCES users ON DELETE CASCADE,
+  token_id         bigint REFERENCES api_tokens ON DELETE SET NULL,
+  request_ip       inet,
+  expires_at       timestamptz NOT NULL,    -- 10 минут
+  created_at       timestamptz NOT NULL DEFAULT now()
+);
+-- Строки старше суток удаляются.
+```
+
+### 18.5 Расширение браузера: как узнаём, что играет
+
+- **Content scripts на страницах веб-плееров** с **отдельным коннектором на каждый сайт**. Коннектор знает DOM конкретного плеера и отдаёт `PlaybackState`: артист, трек, альбом, длительность, текущая позиция, играет ли, уникальный id трека, реклама ли. Изменения ловим через `MutationObserver` и событие `timeupdate` у `<audio>`/`<video>`, с запасным опросом раз в секунду.
+- **Коннекторы MVP:** Яндекс Музыка, VK Музыка, Звук, КИОН Музыка (работает ли старый адрес после ребрендинга — **не проверено**, [music-services-ru.md](music-services-ru.md)), YouTube Music. Затем — по запросам пользователей.
+- **Общий запасной коннектор** — `navigator.mediaSession.metadata` (Media Session API, который многие плееры заполняют для системных медиаклавиш). Он читается скриптом, внедрённым в контекст страницы (как `*-dom-inject` у Web Scrobbler); можно ли прочитать его из изолированного мира content script — **не проверено**. Включается пользователем для конкретного сайта кнопкой «Скробблить с этого сайта» через `optional_host_permissions`.
+- **Разрешения:** `host_permissions` только для поддерживаемых сайтов, `storage`, `alarms`. Никаких `tabs`/`history`/`<all_urls>` по умолчанию — расширение не видит, какие ещё сайты открыты.
+- **Несколько вкладок:** скробблится только последняя начавшая играть вкладка; остальные ставятся на паузу в автомате.
+- **Manifest V3:** код коннекторов поставляется внутри пакета (удалённый код в MV3 запрещён), поэтому починка сломанного коннектора = новая версия в магазинах. Пока она проходит модерацию, сервер отключает коннектор через `disabled_connectors` (§18.3), чтобы он не слал мусор.
+- **Жизненный цикл фона:** в Chrome фоновый service worker останавливается после 30 с бездействия ([Chrome](https://developer.chrome.com/docs/extensions/develop/concepts/service-workers/lifecycle)), поэтому состояние автомата — в `storage.session`, очередь — в `IndexedDB`, повторы — через `alarms` (минимальный период — 30 с с Chrome 120). Firefox в MV3 использует фоновые скрипты (event page) вместо service worker ([MV3 в Firefox](https://extensionworkshop.com/documentation/develop/manifest-v3-migration-guide/)); общий код это учитывает.
+- **Браузеры:** Chrome и Chromium-браузеры (Яндекс Браузер, Edge, Opera), Firefox. Safari — later (отдельная сборка и Apple Developer Program, §18.11).
+
+### 18.6 Десктоп-приложение: как узнаём, что играет
+
+Читаем **системные медиасессии**, которые плееры публикуют для медиаклавиш и виджетов ОС. Это работает с большинством плееров без плагинов.
+
+| ОС | Источник | Особенности |
+|---|---|---|
+| **Windows 10 1809+ / 11** | SMTC: `GlobalSystemMediaTransportControlsSessionManager` (`Windows.Media.Control`, [docs](https://learn.microsoft.com/en-us/uwp/api/windows.media.control.globalsystemmediatransportcontrolssessionmanager)) — список сессий, события `SessionsChanged`, `MediaPropertiesChanged`, `PlaybackInfoChanged`, `TimelinePropertiesChanged` | Сессия = приложение (`SourceAppUserModelId`), можно вести список разрешённых плееров. Не все приложения обновляют позицию в timeline — время звучания считаем своим таймером по `PlaybackStatus` |
+| **macOS** | Now Playing через приватный фреймворк MediaRemote. С macOS 15.4 сторонним приложениям доступ закрыт; обход — [mediaremote-adapter](https://github.com/ungive/mediaremote-adapter): загрузка вспомогательного фреймворка через системный `/usr/bin/perl`, у которого есть нужное право | Хрупко: Apple может закрыть обход в любой версии. Запасной вариант — AppleScript для конкретных приложений (Музыка, Spotify) с разрешением «Автоматизация». Поэтому macOS — **best effort** и позже Windows/Linux (§18.14) |
+| **Linux** | MPRIS по D-Bus ([спецификация](https://specifications.freedesktop.org/mpris-spec/latest/)): сервисы `org.mpris.MediaPlayer2.*`, сигнал `PropertiesChanged`, поля `xesam:title`, `xesam:artist`, `xesam:album`, `mpris:length`; `Position` не приходит в сигналах — опрашиваем | Так работает rescrobbled (§3.3). Плееры различаются полнотой метаданных |
+
+- **Браузеры тоже публикуют медиасессии** (SMTC в Windows, MPRIS в Linux). Чтобы веб-плеер не скробблился дважды (расширением и десктопом), десктоп по умолчанию **игнорирует сессии браузеров**, если у пользователя есть активный токен расширения; плюс серверная дедупликация между источниками (§5.4).
+- **Фильтры:** список плееров «скробблить / не скробблить», по умолчанию пропускаются видеоплееры и браузеры (см. выше); игнор треков без артиста; опционально — регулярные правки метаданных (later).
+- **Работа в фоне:** автозапуск при входе в систему (выключаемый), значок в трее, без окна.
+
+### 18.7 Правила скроббла и now playing
+
+- **Порог** (как у Last.fm и ListenBrainz, §11.1 шаг 6): трек длиннее **30 с** скробблится, когда **реально прозвучал** половину длительности или **4 минуты** — что раньше. Если длительность неизвестна — после 4 минут звучания. Пороги приходят из `GET /api/v1/scrobble/config`, клиент хранит значения по умолчанию.
+- **Считаем время звучания, а не время на часах:** пауза останавливает счётчик, перемотка вперёд не засчитывается как прослушанное. `listened_at` — момент начала трека (UTC).
+- **Повтор того же трека** — новый скроббл после нового полного порога (смена `unique_id` или позиция вернулась к началу).
+- **Не скробблим:** рекламу (`is_ad` от коннектора), треки короче 30 с, вкладки инкогнито (по умолчанию расширение в них не работает), сайты и плееры, выключенные пользователем, всё во время «Паузы скробблинга» (на 1 час / до завтра / до включения).
+- **Now playing:** отправляется при старте и после возобновления трека, повторно — не чаще раза в минуту при изменении; при паузе дольше 5 минут или закрытии вкладки — `DELETE`. Сервер выставляет TTL сам (§11.1, шаг 7).
+
+### 18.8 Офлайн-очередь, пачки и повторы
+
+- Каждый скроббл сначала пишется **в локальную очередь** (IndexedDB / SQLite) с `client_id`, и только потом отправляется. Закрытие браузера, сон ноутбука или нет сети — ничего не теряется.
+- **Пачки:** отправка сразу после скроббла и затем раз в 30 с, до 50 прослушиваний в запросе (§18.3); после долгого офлайна очередь уходит последовательными пачками.
+- **Повторы:** сетевая ошибка и `5xx` — экспоненциальный backoff с джиттером от 30 с до 1 ч; `429` — по `Retry-After`; `401` — токен отозван, отправка останавливается, клиент предлагает войти заново (очередь сохраняется); `426` — предложение обновиться; поштучный `rejected` — запись удаляется из очереди и видна в журнале клиента.
+- **Ограничения очереди:** до 10 000 записей и 14 дней; старше — не отправляем и показываем предупреждение (сервер всё равно примет старые даты, §11.1 шаг 5, но такие записи скорее ошибка часов).
+- Метрики со стороны сервера: доля `duplicate` (признак лишних повторов), возраст приходящих прослушиваний, версии клиентов (§7.4).
+
+### 18.9 Приватность
+
+- Клиент отправляет **только данные о треке** (артист, трек, альбом, длительность, время, коннектор). Никаких адресов страниц, истории браузера, списка процессов или окон.
+- Расширение получает доступ только к сайтам плееров (§18.5); для остальных сайтов — явное разрешение пользователя по одному сайту.
+- **Телеметрии нет по умолчанию.** Отчёты о сбоях — по согласию, в self-hosted GlitchTip в РФ (§6.1), без метаданных треков.
+- Журнал «что отправлено» виден в самом клиенте; кнопка «Пауза скробблинга»; приватный режим профиля работает как и раньше (§8.3).
+- Политика конфиденциальности клиентов — часть общей политики обработки ПДн (§15); магазины расширений требуют отдельной страницы с описанием собираемых данных.
+
+### 18.10 Обновления
+
+- **Расширение** обновляется магазинами автоматически. Минимальная поддерживаемая версия — `min_client_version` (§18.3); при `426` клиент показывает «Обновите расширение».
+- **Десктоп** — встроенный автообновлятор с **обязательной проверкой подписи** обновления (у Tauri это нельзя отключить, [updater](https://v2.tauri.app/plugin/updater/)). Манифест обновлений и файлы — на нашем домене в РФ (`https://dl.scrobb.ru/desktop/{target}/{arch}/{version}`, S3), каналы `stable` и `beta`. Приватный ключ подписи обновлений — только в секретах CI, с резервной копией офлайн: без него нельзя выпустить обновление уже установленным клиентам.
+- Обновление не трогает очередь и токен; миграции локальной SQLite — при старте.
+
+### 18.11 Распространение
+
+| Канал | Что известно | Статус |
+|---|---|---|
+| Chrome Web Store | Нужна регистрация разработчика с разовым взносом; Россия есть в списке поддерживаемых стран ([Chrome](https://developer.chrome.com/docs/webstore/register), страница обновлена 13.02.2024) | Можно ли оплатить взнос и публиковаться из РФ сейчас и доступна ли установка пользователям из РФ — **не проверено** |
+| Firefox Add-ons (AMO) | Публикация и подпись расширений | Доступность из РФ — **не проверено**. Запасной путь: самостоятельная раздача подписанного через AMO файла (unlisted) с нашего сайта |
+| Edge Add-ons, каталог Opera | Ставят расширения Chromium | Доступность из РФ — **не проверено** |
+| Яндекс Браузер | Ставит расширения из Chrome Web Store и из каталога Opera | **Не проверено** на текущей версии; проверить в первую очередь — это массовый браузер в РФ |
+| Десктоп: Windows | Установщик NSIS/MSI + подпись кода (Authenticode). Без подписи — предупреждение SmartScreen «Неизвестный издатель» (так распространяется Pano Scrobbler, см. его README) | Где купить сертификат подписи из РФ и сколько он стоит — **не проверено**. Позже — winget |
+| Десктоп: macOS | Developer ID + нотаризация (Apple Developer Program), иначе Gatekeeper блокирует запуск | Оплата программы из РФ — **не проверено**; вместе с хрупкостью Now Playing — причина отложить macOS |
+| Десктоп: Linux | AppImage и `.deb` с нашего сайта; позже Flathub и AUR | — |
+
+- Все файлы — с нашего домена в РФ (`dl.scrobb.ru`) и зеркалом в GitHub Releases; рядом — SHA-256 и подпись.
+- Страница `/apps` на сайте: «Scrobb для браузера», «Scrobb для компьютера», ниже — «Другие плееры и скробблеры» (сторонние клиенты, §3.3).
+
+### 18.12 Стек
+
+| Часть | Предложение | Почему / альтернатива |
+|---|---|---|
+| Расширение | **TypeScript + WebExtension Manifest V3**, сборка через [WXT](https://github.com/wxt-dev/wxt) (MIT) — одна кодовая база для Chrome/Chromium и Firefox; тесты коннекторов — Vitest на сохранённых HTML-слепках страниц плееров + ночной e2e на Playwright против живых сайтов | Тот же язык, что у веба (Next.js); API-клиент генерируется из OpenAPI. Альтернатива WXT — своя сборка на Vite (как у Web Scrobbler) |
+| Десктоп | **Tauri 2** ([tauri-apps/tauri](https://github.com/tauri-apps/tauri)): оболочка и источники медиасессий на Rust — `windows` ([windows-rs](https://github.com/microsoft/windows-rs)) для SMTC, `mpris` ([mpris-rs](https://github.com/Mange/mpris-rs)) для Linux, [mediaremote-adapter](https://github.com/ungive/mediaremote-adapter) для macOS; очередь — SQLite; секреты — `keyring`; автообновление — плагин updater. Интерфейс — системный WebView с TypeScript, ядро `scrobbler-core` общее с расширением | Маленький установщик (системный WebView, без своего Chromium), подписанные обновления из коробки, нативный доступ к API ОС. Работает ли ядро на JS надёжно в скрытом окне (не притормаживает ли WebView таймеры в фоне) — **не проверено**: если нет, ядро для десктопа переносится в Rust, общими остаются типы API |
+| Десктоп — альтернатива | **Electron** ([electron/electron](https://github.com/electron/electron), MIT): всё на TypeScript, ядро в main-процессе Node | Проще для команды без Rust, но установщик ~100 МБ+ и всё равно нужен нативный модуль для SMTC/MPRIS/MediaRemote |
+| Общее | `scrobbler-core` (TS): автомат, правила, очередь (интерфейс хранилища), API-клиент; монорепозиторий клиентов рядом с бэкендом или отдельным репозиторием | Одна реализация правил скроббла для обоих клиентов |
+| CI | Сборка расширения — на каждом PR; десктоп — матрица Windows/Linux только на тегах релизов (macOS-раннеры дороже по минутам, см. [ci-cd.md](ci-cd.md)) | — |
+
+### 18.13 Open source: что взять за основу
+
+Лицензии сверены по GitHub API 04.10.2026. Принцип: код под **MIT / BSD / Apache-2.0** можно форкать и встраивать (сохраняя уведомление об авторских правах и текст лицензии, для Apache-2.0 — и NOTICE); код под **GPL-3.0** можно взять, только если наш клиент тоже будет под GPL-3.0 с открытыми исходниками, иначе — **только как образец** (читать, понимать подход, писать своё). Решение о лицензии наших клиентов — §16, п. 41.
+
+| Проект | Лицензия | Язык | Форк или образец | Что взять |
+|---|---|---|---|---|
+| [web-scrobbler/web-scrobbler](https://github.com/web-scrobbler/web-scrobbler) | MIT | TypeScript, MV3 (service worker в Chrome, фоновые скрипты в Firefox/Safari) | **Можно форкать** | Главный кандидат для расширения. **Коннекторы** (`src/connectors`, 375 файлов, среди них `yandex-music.ts`, `vk.ts` + `vk-dom-inject.ts`, `zvuk.ts`, `mts-music.ts`, `youtube-music.ts`) и каркас коннекторов (`src/core/content`): селекторы, определение рекламы, инъекция в страницу. Варианты: (а) встроить каркас и нужные коннекторы в своё расширение, с атрибуцией в «О программе» и LICENSE, и регулярно подтягивать исправления из upstream; (б) полный форк с Scrobb как единственным сервисом. Предложение — (а): у нас меньше коннекторов и свой протокол, а исправления коннекторов РФ отправляем обратно в upstream |
+| [FoxxMD/multi-scrobbler](https://github.com/FoxxMD/multi-scrobbler) | MIT | TypeScript | Можно форкать (но это сервер-мост, не клиент) | Образец: логика порога скроббла по реальному времени звучания, обработка перемоток и повторов, дедупликация между источниками |
+| [kawaiiDango/pano-scrobbler](https://github.com/kawaiiDango/pano-scrobbler) | GPL-3.0 | Kotlin (Compose Multiplatform: Android, Windows, Linux) | **Только образец** (если клиенты не GPL) | Как устроены источники на Windows/Linux, списки разрешённых плееров, правки метаданных регулярками, онбординг. Важный факт из README: Windows-сборки распространяются без подписи с предупреждением SmartScreen |
+| [InputUsername/rescrobbled](https://github.com/InputUsername/rescrobbled) | GPL-3.0 | Rust | Только образец | MPRIS-демон с поддержкой ListenBrainz: фильтры плееров, обработка `Position`, правила скроббла |
+| [mariusor/mpris-scrobbler](https://github.com/mariusor/mpris-scrobbler) | MIT | C | Можно форкать (но C, а не Rust/TS) | Образец крайних случаев MPRIS (плееры без длительности или позиции, смена плеера); можно переносить решения без ограничений |
+| [Mange/mpris-rs](https://github.com/Mange/mpris-rs) | Apache-2.0 | Rust | **Зависимость** | Чтение MPRIS по D-Bus в десктопе на Tauri |
+| [microsoft/windows-rs](https://github.com/microsoft/windows-rs) | Apache-2.0 (по GitHub) | Rust | **Зависимость** | Привязки WinRT, в том числе `Windows.Media.Control` (SMTC) |
+| [dagkan/lastfm-scrobbler](https://github.com/dagkan/lastfm-scrobbler) | MIT | C# | Можно форкать (маленький проект, ~10 звёзд) | Образец работы с SMTC на практике (скробблинг приложения Apple Music под Windows) |
+| [ungive/mediaremote-adapter](https://github.com/ungive/mediaremote-adapter) | BSD-3-Clause | Objective-C, Perl | **Зависимость** (сохранить уведомление, не использовать имя автора для продвижения) | Now Playing на macOS 15.4+ (§18.6). Риск — Apple может закрыть обход |
+| [kirtan-shah/nowplaying-cli](https://github.com/kirtan-shah/nowplaying-cli) | GPL-3.0 | Objective-C | Только образец | Чтение MediaRemote на macOS |
+| [lastfm/lastfm-desktop](https://github.com/lastfm/lastfm-desktop) | GPL-3.0 | C++ / Qt | Только образец | Исторический официальный клиент: правила скроббла, офлайн-кэш |
+| [ungive/discord-music-presence](https://github.com/ungive/discord-music-presence) | Собственная лицензия (GitHub: NOASSERTION): «All rights reserved», разрешено только распространение неизменённых бинарников | C++ | **Нельзя использовать код** | Только как пример UX «работает с любым плеером» |
+| [ungive/media-control](https://github.com/ungive/media-control) | Лицензия на GitHub не указана | Perl | **Нельзя использовать код** (без лицензии — все права у автора) | — |
+
+- Перед форком проверить лицензии отдельных файлов и зависимостей (в крупных проектах встречаются файлы под другой лицензией) — **не проверено** для Web Scrobbler по файлам.
+- Названия и логотипы чужих проектов в наших клиентах не используем, только атрибуцию.
+
+### 18.14 MVP и порядок (предложение)
+
+- **MVP (этап 1):** родной API (§18.3) и привязка устройства (§18.4); **расширение** для Chrome/Chromium-браузеров и Firefox с коннекторами Яндекс Музыки, VK Музыки, Звука, YouTube Music (КИОН — если коннектор работает) и запасным Media Session; офлайн-очередь; публикация в доступных из РФ магазинах (§18.11). Совместимые эндпоинты для сторонних клиентов — как раньше (§14, п. 2).
+- **Сразу после MVP (этап 1, вторая волна):** **десктоп** для Windows и Linux (SMTC, MPRIS), автообновление, подписанный установщик для Windows (если решится вопрос сертификата).
+- **Later:** macOS (best effort, §18.6), Safari, правки метаданных регулярками, ручной скроббл из клиента, мобильные клиенты ([stack-rationale.md](stack-rationale.md), «Мобильные приложения»).
+- Риски плана: модерация магазинов и их доступность из РФ (§18.11), поломки коннекторов при редизайне сайтов (нужны ночные e2e и kill switch), сертификат подписи кода.
