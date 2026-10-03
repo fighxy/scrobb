@@ -24,7 +24,7 @@
 | Слой | Назначение |
 |---|---|
 | **Frontend** (Next.js, SSR + клиентская интерактивность) | Публичные профили (SSR ради шаринга и SEO), личный кабинет, статистика и графики, стрики, достижения, друзья, настройки приватности. Работает только через Backend API |
-| **Backend API** (модульный монолит) | REST/JSON + OpenAPI. Модули: `auth`, `users/profiles`, `library` (артисты/альбомы/треки), `listens` (история), `stats`, `social` (подписки, приватность, лидерборды), `gamification` (стрики, достижения), `ingest` (Scrobble API, токены клиентов, §3), `integrations` (импорт и привязка внешних аккаунтов), `notifications`, `media` (аватары/баннеры), `settings` (`user_preferences`), `billing` (донаты, Pro, §12), позже `recommendations`. Единая политика доступа (privacy guard) |
+| **Backend API** (модульный монолит) | REST/JSON + OpenAPI. Модули: `auth`, `users/profiles`, `library` (артисты/альбомы/треки), `listens` (история), `stats`, `social` (подписки, приватность, лидерборды), `gamification` (стрики, достижения), `ingest` (Scrobble API, токены клиентов, §3), `integrations` (импорт и привязка внешних аккаунтов), `notifications`, `email` (адреса, одноразовые ссылки, сессии, отправка писем, §17), `media` (аватары/баннеры), `settings` (`user_preferences`), `billing` (донаты, Pro, §12), позже `recommendations`. Единая политика доступа (privacy guard) |
 | **Integration layer** | Провайдеры источников: **основной — push-приём от клиентов** (`PushScrobbleProvider`, §3), дополнительный — `LastFmProvider` (импорт и опциональная синхронизация, §4), позже Yandex/VK/Zvuk. Нормализация в `ListenEvent`, сопоставление с каноническими треками (matcher), клиенты Last.fm и MusicBrainz с rate limiter |
 | **Background workers + scheduler** | Разбор больших пакетов `import` от клиентов, импорт и опциональная синхронизация Last.fm (backfill/incremental/reconcile), обогащение метаданных, агрегаты (daily_activity, месячные rollup'ы), обработчики геймификации, пересчёт лидербордов, снапшоты топов и отчёты (§9), доставка уведомлений, обработка изображений, позже ночные рекомендации |
 | **Storage** | PostgreSQL — источник истины, `listens` секционированы по времени. Valkey (два экземпляра — очередь и кэш, §7.1) — очередь задач, лимиты частоты (токены клиентов, Last.fm, MusicBrainz), кэш, горячие лидерборды (sorted sets), now playing с TTL. Объектное хранилище S3 в РФ — аватары и баннеры, выгрузки данных |
@@ -45,7 +45,7 @@ flowchart LR
     SOC["social: follows · privacy · leaderboards"]
     GAMI["gamification: streaks · achievements"]
     ING["Scrobble API (основной вход):<br/>ListenBrainz-совм. + Last.fm 2.0-совм."]
-    NOTIF["notifications · settings · media"]
+    NOTIF["notifications · email · settings · media"]
     BILL["billing: донаты · Pro · entitlements"]
     BOT["bot (aiogram 3, webhook) §13"]
     RECS["recommendations (этап 2)"]
@@ -79,6 +79,7 @@ flowchart LR
   LASTFM[["Last.fm API"]]
   MB[["MusicBrainz API"]]
   YK[["ЮKassa API"]]
+  MAIL[["Email-провайдер (РФ, §17.8)"]]
 
   WEB --> API
   PUSH -- "Token / sk" --> ING
@@ -109,6 +110,8 @@ flowchart LR
   TGU -- "webhook + secret_token" --> BOT
   BOT -- "внутренний API" --> CORE
   DLV --> TGU
+  DLV --> MAIL
+  MAIL -- "webhooks: bounce · complaint" --> NOTIF
   RND --> S3
   YK -- "webhooks" --> BILL
   BILL --> PG
@@ -132,6 +135,14 @@ flowchart LR
 ```mermaid
 erDiagram
   users ||--o{ auth_identities : "входит через"
+  users ||--o| user_emails : "адрес (§17)"
+  users ||--o{ email_tokens : "одноразовые ссылки"
+  users ||--o{ user_sessions : "сессии сайта"
+  users ||--o{ email_messages : "письма"
+  notifications ||--o{ email_messages : "канал email"
+  email_messages ||--o{ email_events : "доставка · bounce · жалобы"
+  email_events ||--o{ email_suppressions : "причина"
+  users ||--o{ email_consent_log : "согласия на рассылки"
   users ||--o{ username_history : "прежние имена (hold)"
   users ||--o| telegram_links : "бот (не вход)"
   notifications ||--o{ notification_deliveries : "каналы"
@@ -209,7 +220,62 @@ erDiagram
     bigint user_id FK
     text provider "vkid|yandex|phone|email"
     text subject UK
+    text password_hash "только email: argon2id"
     timestamptz created_at
+  }
+  user_emails {
+    bigint user_id PK
+    citext email "UK среди подтверждённых"
+    timestamptz verified_at
+    timestamptz bounced_at
+  }
+  email_tokens {
+    bigint id PK
+    bigint user_id FK
+    text purpose "verify_email|change_email|revert_email|reset_password"
+    bytea token_hash UK
+    citext email
+    timestamptz expires_at
+    timestamptz used_at
+  }
+  user_sessions {
+    bigint id PK
+    bigint user_id FK
+    bytea token_hash UK
+    text auth_method
+    timestamptz authenticated_at
+    timestamptz expires_at
+    timestamptz revoked_at
+  }
+  email_messages {
+    bigint id PK
+    bigint user_id FK
+    bigint notification_id FK
+    text stream "tx|news"
+    text template
+    text dedup_key UK
+    text status
+    text provider_message_id UK
+  }
+  email_events {
+    bigint id PK
+    text provider_event_id UK
+    bigint message_id FK
+    text type "delivered|bounce_hard|bounce_soft|complaint|unsubscribe"
+  }
+  email_suppressions {
+    bytea email_hash PK "HMAC адреса"
+    text scope "all|non_essential"
+    text reason
+    bigint source_event_id FK
+  }
+  email_consent_log {
+    bigint id PK
+    bigint user_id FK
+    text category "weekly_digest|news"
+    bool granted
+    text source
+    text text_version
   }
   privacy_settings {
     bigint user_id PK
@@ -676,7 +742,7 @@ CREATE TABLE jobs_dead (
 );
 ```
 
-Остальные DDL-эскизы: `reserved_usernames` и `username_history` — в §2.5, `api_tokens`, `profiles`, `favorites` — в §9.9, `notifications` — в §9.8, достижения — в §8.2, биллинг — в §12.4, Telegram — в §13.8.
+Остальные DDL-эскизы: `reserved_usernames` и `username_history` — в §2.5, email, сессии и согласия на рассылки — в §17.10, `api_tokens`, `profiles`, `favorites` — в §9.9, `notifications` — в §9.8, достижения — в §8.2, биллинг — в §12.4, Telegram — в §13.8.
 
 **Объём.** При допущении (не измерено) 30 скробблов в день на активного пользователя 10 тыс. пользователей дают около 110 млн строк в год. Для PostgreSQL с месячными секциями это немного. TimescaleDB (hypertable + continuous aggregates) — вариант на потом, если ручные rollup'ы станут болью (§6).
 
@@ -1012,7 +1078,7 @@ class ProviderRegistry:
 | БД | **PostgreSQL 16** с декларативным секционированием `listens` по месяцам (pg_partman), `pg_trgm`, `citext` | Один движок для OLTP и агрегатов, оконные функции для стриков (gaps-and-islands), `ON CONFLICT` для идемпотентности. TimescaleDB — опция позже |
 | Кэш / лидерборды / rate limit / брокер | **Valkey** — два экземпляра: очередь и кэш (§7.1) | Token bucket для лимитов на токены клиентов (§11.1), Last.fm и MusicBrainz (у MusicBrainz жёстко ≤1 req/s с IP и обязательный User-Agent, [rate limiting](https://musicbrainz.org/doc/MusicBrainz_API/Rate_Limiting)), sorted sets для лидербордов, now playing с TTL, брокер очереди. **Почему Valkey, а не Redis:** в 2024 году Redis сменил лицензию BSD на RSALv2 / SSPLv1 (с версии 7.4, [анонс](https://redis.io/blog/redis-adopts-dual-source-available-licensing/)), в Redis 8 добавлен вариант AGPLv3 ([анонс](https://redis.io/blog/agplv3/)). Valkey — форк Redis под эгидой Linux Foundation, лицензия BSD 3-Clause, совместимый протокол ([Linux Foundation](https://www.linuxfoundation.org/press/linux-foundation-launches-open-source-valkey-community), [valkey.io](https://valkey.io/)); подробнее — §6.3 |
 | Фронтенд | **Next.js (App Router, TypeScript)**, TanStack Query, графики — ECharts или Recharts, UI — Tailwind + shadcn/ui | SSR для публичных профилей (превью ссылок, SEO), большая экосистема. Tailwind и shadcn/ui настраиваются на дизайн-токены (CSS-переменные) из §10, цвета серий графиков берутся из тех же токенов |
-| Авторизация | Свои сессии (httpOnly cookie) + OAuth-клиенты **VK ID** (OAuth 2.1 + PKCE, [docs](https://id.vk.com/about/business/go/docs/ru/vkid/latest/vk-id/connection/start-integration/auth-without-sdk/auth-without-sdk-web)), **Яндекс ID** ([docs](https://yandex.com/dev/id/doc/ru/register-auth)), вход по телефону (SMS-провайдер РФ) | Соответствует 149-ФЗ ст. 8 ч. 10 (R3). Telegram — только как канал уведомлений, не для входа |
+| Авторизация | Свои сессии (httpOnly cookie, `user_sessions`, §17.4) + OAuth-клиенты **VK ID** (OAuth 2.1 + PKCE, [docs](https://id.vk.com/about/business/go/docs/ru/vkid/latest/vk-id/connection/start-integration/auth-without-sdk/auth-without-sdk-web)), **Яндекс ID** ([docs](https://yandex.com/dev/id/doc/ru/register-auth)), вход по телефону (SMS-провайдер РФ) | Соответствует 149-ФЗ ст. 8 ч. 10 (R3). Telegram — только как канал уведомлений, не для входа. Email — канал связи; вход по email и паролю (argon2id) — только под флагом после ответа юриста (§17.1) |
 | Деплой | **Docker Compose** на VPS или в облаке **в РФ** (Selectel / Yandex Cloud / VK Cloud / Timeweb — выбрать). Сервисы: `api`, `worker`, `scheduler`, `web`, `bot` (Telegram, §13), `postgres`, `valkey` (два экземпляра — очередь и кэш, §7.1), `caddy` (TLS). Опционально — egress-прокси за пределами РФ только для `ws.audioscrobbler.com` (R1/R4) | Один человек поднимет всё за вечер. Managed PostgreSQL у того же провайдера снимает бэкапы и PITR |
 | CI/CD | **GitHub Actions**: lint (ruff, eslint), тесты (pytest + testcontainers-postgres), сборка образов → GHCR → деплой по SSH (`docker compose pull && up -d`), миграции Alembic отдельным шагом | Доступен в репозитории уже сейчас |
 | Наблюдаемость | Структурные JSON-логи; Prometheus-метрики (латентность и доля `5xx` приёма скробблов, «замолчавшие» токены, глубина очередей; для импорта Last.fm — лаг синхронизации, частота ошибок `29` и `17`, запросов в секунду к Last.fm; полный список — §7.4) + Grafana; ошибки — **self-hosted GlitchTip** (Sentry-совместимый). SaaS-Sentry — это передача ПДн за рубеж (R4); uptime-проверки | Главный риск — тихо сломавшийся приём или импорт, отсюда алерты на `5xx` приёма (> 0,5%) и «лаг > 1 ч у >5% аккаунтов» с синхронизацией (§7.4) |
@@ -1156,6 +1222,9 @@ Prometheus, Grafana и GlitchTip (это ещё один PostgreSQL) лучше 
 | API (метрики приложения/Caddy) | p95 латентности чтения | > 300 мс |
 | | Доля 5xx | > 1% |
 | | Лаг event loop | > 100 мс |
+| Email (§17) | Возраст самой старой задачи `email_tx` | > 2 мин — письма подтверждения и сброса ждут |
+| | Доля hard bounce / жалоб по потоку | > 2% / > 0,1% за отправку — пауза потока `news` (§17.7) |
+| | Ошибки отправки и неподписанные вебхуки | Рост → алерт |
 | Хост | Диск | > 70% warn / > 85% crit; `predict_linear` до заполнения < 30 дней |
 | | Swap | > 0 устойчиво; OOM-kill — алерт |
 
@@ -1201,7 +1270,7 @@ flowchart LR
 
 - **Stateless-процессы.** api, web и worker не хранят состояние локально: сессии лежат в БД или Valkey, файлы — в S3, задачи — в очереди. Любой процесс можно запустить в N экземплярах на любой машине.
 - **Один образ, роль задаётся переменной окружения:** `ROLE=api|worker|scheduler|bot`.
-- **Вся топология — в переменных окружения:** `DATABASE_URL`, `DATABASE_READ_URL` (по умолчанию = `DATABASE_URL`), `VALKEY_QUEUE_URL`, `VALKEY_CACHE_URL`, `JOBS_BACKEND=arq|dramatiq|saq|procrastinate`, `WORKER_QUEUES`, `WORKER_CONCURRENCY`, `INGEST_RATE_LIMITS`, `INGEST_DEDUP_WINDOW_S`, `LASTFM_ENABLED`, `LASTFM_RATE_LIMIT_RPS`, `LASTFM_EGRESS_PROXY`, `S3_ENDPOINT`, `S3_BUCKET`.
+- **Вся топология — в переменных окружения:** `DATABASE_URL`, `DATABASE_READ_URL` (по умолчанию = `DATABASE_URL`), `VALKEY_QUEUE_URL`, `VALKEY_CACHE_URL`, `JOBS_BACKEND=arq|dramatiq|saq|procrastinate`, `WORKER_QUEUES`, `WORKER_CONCURRENCY`, `INGEST_RATE_LIMITS`, `INGEST_DEDUP_WINDOW_S`, `LASTFM_ENABLED`, `LASTFM_RATE_LIMIT_RPS`, `LASTFM_EGRESS_PROXY`, `S3_ENDPOINT`, `S3_BUCKET`, `EMAIL_BACKEND=smtp|api|catcher|memory`, `EMAIL_TX_FROM`, `EMAIL_NEWS_FROM`, `EMAIL_WEBHOOK_SECRET`, `EMAIL_HASH_KEY`, `AUTH_EMAIL_PASSWORD`, `AUTH_EMAIL_SIGNUP`.
 - **Очередь — за тонким интерфейсом `jobs`** (§6.3): смена брокера = новый адаптер + `JOBS_BACKEND`.
 - **Единственный синглтон — scheduler.** Защищён лидер-локом (`pg_try_advisory_lock` или Valkey-лок с TTL), поэтому случайный второй экземпляр безопасен.
 - **Миграции** выполняются отдельным шагом деплоя, а не при старте каждого экземпляра.
@@ -1379,10 +1448,11 @@ CREATE TABLE user_achievements (
 | `achievement_unlocked` | `AchievementUnlocked` | in-app | Ретроактивные после backfill — **одним** сводным уведомлением «Получено 14 достижений» |
 | `streak_at_risk` | Планировщик раз в час: у пользователя в его TZ 20:00, сегодня 0 активных прослушиваний, `current_streak >= 3` | in-app (+ Telegram-бот, §13.4) | Не больше одного в день (`dedup_key = streak:{user}:{local_date}`) |
 | `friend_overtook` | Пересчёт дружеского лидерборда: друг поднялся выше пользователя | in-app | Не чаще раза в день на пару |
-| `report_ready` | Сгенерирован недельный отчёт | in-app (Telegram — Later, по умолчанию выключен, §13.4) | — |
+| `report_ready` | Сгенерирован недельный отчёт | in-app (Telegram — Later, по умолчанию выключен, §13.4; email-сводка — Later, только по согласию, §17.5) | — |
 | `sync_problem` | Аккаунт Last.fm стал `private` или `not_found`, лаг синхронизации больше 24 ч; **токен клиента, который писал каждый день, молчит 3 дня** («Web Scrobbler на ноутбуке не присылал данные с 1 октября») | in-app + email | Один раз на смену статуса |
 | `client_connected` | Первый скроббл по новому токену (§3.4) | in-app | Один раз на токен |
 | `pro_expiring` | Pro заканчивается через 3 дня и через 1 день (этап 2, §12.4) | in-app + email (Telegram — по настройкам) | Один раз на каждый порог и срок |
+| `security_alert` | Смена пароля или адреса, привязка и отвязка способа входа, привязка Telegram, запрос удаления аккаунта (§17.4) | in-app + email + Telegram, **отключить нельзя** | Каждое событие — отдельно (`dedup_key` = id события) |
 
 ```sql
 CREATE TABLE notifications (
@@ -1398,7 +1468,7 @@ CREATE TABLE notifications (
 CREATE INDEX ON notifications (user_id, created_at DESC) WHERE read_at IS NULL;
 ```
 
-**Доставка.** Модуль `notifications` подписан на доменные события через outbox. Запись в `notifications` — это in-app канал. Воркер `delivery` рассылает по внешним каналам согласно настройкам: email через SMTP-провайдера в РФ; Telegram-бот (как канал связи он допустим, в отличие от входа, R3; §13.4) и позже Web Push. Учёт отправок по каналам — `notification_deliveries` (§13.8). Счётчик непрочитанных — `GET /api/v1/me/notifications/unread_count` (поллинг раз в минуту, позже SSE). Остальные эндпоинты: `GET /api/v1/me/notifications?cursor=`, `POST /api/v1/me/notifications/read {ids|all}`.
+**Доставка.** Модуль `notifications` подписан на доменные события через outbox. Запись в `notifications` — это in-app канал. Воркер `delivery` рассылает по внешним каналам согласно настройкам: email через интерфейс `email` и провайдера в РФ (§17.8; только на подтверждённый адрес, с проверкой suppression); Telegram-бот (как канал связи он допустим, в отличие от входа, R3; §13.4) и позже Web Push. Учёт отправок по каналам — `notification_deliveries` (§13.8). Счётчик непрочитанных — `GET /api/v1/me/notifications/unread_count` (поллинг раз в минуту, позже SSE). Остальные эндпоинты: `GET /api/v1/me/notifications?cursor=`, `POST /api/v1/me/notifications/read {ids|all}`.
 
 **Сообщения** (личная переписка) — later: это отдельная подсистема с модерацией и анти-спамом.
 
@@ -1412,9 +1482,9 @@ CREATE INDEX ON notifications (user_id, created_at DESC) WHERE read_at IS NULL;
 | **Время и стрики** | Таймзона (по умолчанию из браузера, подтверждается пользователем), порог активного дня | `users.timezone`, `user_preferences.streak_rule` | MVP |
 | **Приватность** | Видимость профиля и разделов, «не показывать в лидербордах», «скрыть now playing» | `privacy_settings` (§8.3) | MVP |
 | **Отображение** | Для каждого виджета профиля (см. ниже); настройки владельца определяют, как его профиль видят другие | `user_preferences.display` | MVP |
-| **Уведомления** | Матрица «тип × канал» (in-app / email / Telegram) | `user_preferences.notifications` | MVP (in-app; email для `sync_problem`; Telegram после привязки бота, §13.2) |
+| **Уведомления** | Матрица «тип × канал» (in-app / email / Telegram); `security_alert` выключить нельзя. Отдельный блок «Рассылки на почту» — неотмеченные по умолчанию галочки «Еженедельная сводка» и «Новости Scrobb» (§17.6) | `user_preferences.notifications`, `email_consent_log` | MVP (in-app; email для `sync_problem` и безопасности; Telegram после привязки бота, §13.2); рассылки — later |
 | **Подключения** | Last.fm (необязательно): «Импортировать историю» и переключатель «Продолжать синхронизацию» (по умолчанию выключен, с подсказкой, что лучше направить клиента прямо в Scrobb); статус, «последняя синхронизация N мин назад», прогресс backfill, «Синхронизировать сейчас» (rate limit), «Отвязать» — с выбором, удалить ли импортированные данные (ToS п. 9.3 и право пользователя) | `external_accounts`, `sync_state` | MVP |
-| **Аккаунт** | Способы входа (VK ID, Яндекс ID, телефон), привязка и отвязка (минимум один должен остаться), email для уведомлений, смена username, экспорт данных (JSON/CSV — `listens` + метаданные; асинхронно, ссылка на 24 ч), удаление аккаунта | `auth_identities`, `users` | MVP: способы входа и удаление; экспорт — later (лучше рано) |
+| **Аккаунт** | Способы входа (VK ID, Яндекс ID, телефон), привязка и отвязка (минимум один должен остаться), email: привязка, подтверждение и смена (§17.2), пароль — если вход по паролю включён (§17.3), активные сессии и «выйти на всех устройствах» (§17.4), смена username, экспорт данных (JSON/CSV — `listens` + метаданные; асинхронно, ссылка на 24 ч), удаление аккаунта | `auth_identities`, `users`, `user_emails`, `user_sessions` | MVP: способы входа, email и сессии, удаление; экспорт — later (лучше рано) |
 | **Приложения** | **Главная вкладка этапа 1.** API-токены для Scrobble API (§3): создать (показ один раз, имя устройства), список с `last_used_at` и последним клиентом (`submission_client`: Web Scrobbler, Pano Scrobbler…), отозвать. Адреса для обоих протоколов с кнопкой «скопировать». Раздел **«Как подключить плеер»** — по странице на клиента из §3.3 с проверкой подключения (§3.4) | `api_tokens` | **MVP** |
 
 **Аватар и баннер.** S3-совместимое объектное хранилище **в РФ** (Yandex Object Storage / Selectel / VK Cloud — у того же провайдера, что и БД). Фото пользователя — его ПДн, поэтому только в РФ (R4).
@@ -1443,7 +1513,9 @@ CREATE INDEX ON notifications (user_id, created_at DESC) WHERE read_at IS NULL;
   "notifications": {
     "new_follower":   { "inapp": true, "email": false, "telegram": false },
     "streak_at_risk": { "inapp": true, "email": false, "telegram": false },
-    "report_ready":   { "inapp": true, "email": false, "telegram": false }
+    "report_ready":   { "inapp": true, "email": false, "telegram": false },
+    "sync_problem":   { "inapp": true, "email": true,  "telegram": false },
+    "email_marketing": { "weekly_digest": false, "news": false }
   }
 }
 ```
@@ -1554,7 +1626,7 @@ API: `GET /api/v1/me/recommendations?type=all|artists|albums|tracks&cursor=`, `P
 
 | MVP | Later |
 |---|---|
-| Шапка профиля со счётчиками и стриком; Recent Tracks с автообновлением поллингом; топы артистов, альбомов и треков с периодами `7d…all` и барами; «на этой неделе» + мини-графики + недельный отчёт; Library (артисты, треки); Following/Followers; дружеские лидерборды (неделя, месяц, всё время, §11.7); Loved (свои лайки + импорт из Last.fm); меню аккаунта; in-app уведомления (follower, achievement, streak_at_risk, sync_problem, client_connected); настройки: профиль+аватар, таймзона, приватность, отображение, **«Приложения» (токены) и «Как подключить плеер»**, импорт Last.fm (необязательно), выбор и смена @username, привязка Telegram-бота, способы входа, удаление аккаунта | Баннер; фото артистов; share-картинки; месячные и годовые отчёты, «Итоги года»; часы прослушивания; ссылки на RU-сервисы; email-доставка (кроме `sync_problem`); SSE; экспорт данных; рекомендации (этап 2, начиная с rediscover); Shoutbox, сообщения; Events |
+| Шапка профиля со счётчиками и стриком; Recent Tracks с автообновлением поллингом; топы артистов, альбомов и треков с периодами `7d…all` и барами; «на этой неделе» + мини-графики + недельный отчёт; Library (артисты, треки); Following/Followers; дружеские лидерборды (неделя, месяц, всё время, §11.7); Loved (свои лайки + импорт из Last.fm); меню аккаунта; in-app уведомления (follower, achievement, streak_at_risk, sync_problem, client_connected); настройки: профиль+аватар, таймзона, приватность, отображение, email и сессии (§17), **«Приложения» (токены) и «Как подключить плеер»**, импорт Last.fm (необязательно), выбор и смена @username, привязка Telegram-бота, способы входа, удаление аккаунта | Баннер; фото артистов; share-картинки; месячные и годовые отчёты, «Итоги года»; часы прослушивания; ссылки на RU-сервисы; email-сводки и новости (§17.12); SSE; экспорт данных; рекомендации (этап 2, начиная с rediscover); Shoutbox, сообщения; Events |
 
 ---
 
@@ -1862,6 +1934,84 @@ API: `GET /api/v1/me/recommendations?type=all|artists|albums|tracks&cursor=`, `P
 
 **Что кэшируется:** сами ZSET (это и есть кэш, источник истины — `user_period_stats`); собранный ответ дружеской доски — в Valkey на 5 мин по ключу `lbv:{viewer}:{metric}:{period_id}`.
 
+### 11.8 Email: подтверждение и смена адреса
+
+Политика — §17.2, таблицы — §17.10.
+
+**Вход:** `POST /api/v1/me/email {email}` (привязка или смена), `POST /api/v1/me/email/resend`, `POST /api/v1/auth/email/confirm {token}`, `POST /api/v1/auth/email/revert {token}`.
+
+**Шаги:**
+1. **Привязка или смена.** Нормализовать адрес (обрезать пробелы, домен — в нижнем регистре и в punycode), проверить синтаксис и наличие MX у домена. Для смены — проверить «свежую» сессию (`authenticated_at` не старше 15 мин, §17.4), иначе `403` с требованием повторного входа.
+2. **Ответ не раскрывает занятость.** Если адрес подтверждён у другого пользователя, ответ тот же («Мы отправили письмо на новый адрес»), но письмо уходит только с текстом «Этот адрес уже используется в Scrobb — если это ваш аккаунт, войдите в него». Проверка suppression: при `scope = all` — сразу ошибка «На этот адрес письма не доходят».
+3. **Токен.** В одной транзакции: погасить прежние неиспользованные токены этого назначения (`used_at = now()`), создать новый (`verify_email` при первой привязке или `change_email` при смене; TTL 24 ч, только `sha256`, §17.2), записать `email_messages` (`queued`) и событие `EmailRequested` в outbox. Для первой привязки адрес сразу пишется в `user_emails` с `verified_at = NULL`; для смены текущий подтверждённый адрес не трогается, новый лежит в `email_tokens.email`.
+4. **Смена: уведомить старый адрес.** Сразу — письмо `email_change_requested` на старый подтверждённый адрес с токеном `revert_email` (TTL 7 дней, `payload = {"restore_email": old}`), плюс in-app и Telegram (`security_alert`, §17.4).
+5. **Повторная отправка** (`resend`): лимиты §17.2 (token bucket в Valkey на пользователя и на IP); новый токен гасит старый (шаг 3).
+6. **Подтверждение** (`confirm`): атомарно погасить токен (`UPDATE … WHERE token_hash = $1 AND used_at IS NULL AND expires_at > now() RETURNING user_id, purpose, email`). Нет строки → единая ошибка «Ссылка устарела». Затем в транзакции:
+   - `verify_email`: `user_emails.verified_at = now()`, `bounced_at = NULL`;
+   - `change_email`: `user_emails.email = <новый>`, `verified_at = now()`; если есть вход по паролю — `auth_identities.subject` = новый адрес; письмо `email_changed` на **старый** адрес с той же ссылкой отмены;
+   - конфликт уникальности (адрес успели подтвердить в другом аккаунте) → ошибка «Адрес уже используется», токен погашен;
+   - событие `EmailVerified` → снять ограничения неподтверждённого аккаунта (§17.2), отменить задачу удаления.
+7. **Отмена смены** (`revert`): погасить `revert_email`, вернуть `restore_email` как подтверждённый адрес, погасить все неиспользованные `change_email`, **отозвать все сессии** и отправить на восстановленный адрес письмо с предложением сменить пароль (если он есть) — сценарий захвата аккаунта.
+8. **Неподтверждённые аккаунты** (только `AUTH_EMAIL_SIGNUP`): планировщик раз в сутки — напоминание в интерфейсе на 1-й и 7-й день, предупреждение за 3 дня, удаление на 30-й день (каскадное, §15).
+
+**Выход:** `user_emails`, погашенные токены, письма в очереди, события `EmailVerified` / `EmailChanged`, уведомления безопасности.
+
+**Что кэшируется:** счётчики лимитов в Valkey; сами токены — нет.
+
+### 11.9 Сброс пароля
+
+Политика — §17.3. Только при `AUTH_EMAIL_PASSWORD`.
+
+**Вход:** `POST /api/v1/auth/password/forgot {email}`, `POST /api/v1/auth/password/reset {token, new_password}`.
+
+**Шаги:**
+1. **Запрос.** Проверить только синтаксис адреса и лимит по IP (10 в час). Поставить задачу `password_forgot` с нормализованным адресом и IP и **всегда** ответить `202` с одним и тем же текстом. Ни результат, ни время ответа не зависят от того, есть ли адрес.
+2. **Задача** `password_forgot`:
+   - лимит по `HMAC(адрес)` — 3 в час, 10 в сутки; превышение → тихо выйти (метрика);
+   - найти `user_emails` с этим адресом и `verified_at IS NOT NULL`; нет → выйти без письма;
+   - suppression `scope = all` → выйти (метрика);
+   - у аккаунта нет `auth_identities` с `provider = 'email'` → письмо «У аккаунта нет пароля, войдите через …» и выйти;
+   - иначе в транзакции: погасить прежние `reset_password`, создать новый токен (TTL 30 мин), `email_messages` → отправка в очереди `email_tx`.
+3. **Страница сброса** читает токен из фрагмента ссылки (§17.2) и показывает форму нового пароля; токен на этом шаге не гасится.
+4. **Сброс.** Проверить требования к паролю (§17.3) **до** погашения токена, чтобы ошибка ввода не сжигала ссылку. Затем одной транзакцией:
+   - атомарно погасить токен (как в §11.8, шаг 6); нет строки → «Ссылка устарела»;
+   - `auth_identities.password_hash = argon2id(new_password)` (хэш считается заранее, в пуле потоков);
+   - отозвать **все** `user_sessions` пользователя (`revoked_at = now()`) и сбросить их кэш в Valkey;
+   - погасить остальные неиспользованные токены `reset_password`;
+   - API-токены и `as2_session` **не трогать** (обоснование — §17.3);
+   - событие `PasswordChanged{user_id, via: reset, ip}` в outbox.
+5. Создать новую сессию и войти (cookie). Обработчик `PasswordChanged` шлёт `security_alert` (`password_changed`): email на подтверждённый адрес, in-app и Telegram — со временем, IP, браузером, числом активных API-токенов и ссылками «Это был не я» и «Отозвать все токены».
+
+**Выход:** новый `password_hash`, отозванные сессии, событие `PasswordChanged`, уведомление.
+
+**Что кэшируется:** счётчики лимитов в Valkey; кэш сессий сбрасывается.
+
+### 11.10 Рассылки, обработка bounce и жалоб
+
+Политика — §17.5–§17.8.
+
+**Вход:** тик планировщика (сводки), ручной запуск рассылки новостей из админки, вебхук `POST /api/v1/webhooks/email`.
+
+**Шаги — пакетная рассылка:**
+1. **Выбор получателей** волнами по TZ (сводка — утром понедельника по местному времени, после генерации недельного отчёта, §9.5): подтверждённый адрес, согласие на категорию в `user_preferences.notifications.email_marketing`, нет suppression, для сводки — были прослушивания за неделю (пустых сводок не шлём).
+2. Нарезать на пачки по 100–500 и поставить задачи `email_batch:{campaign}:{n}` в очередь `email_news` (уникальный ключ).
+3. **В задаче на каждого получателя:** повторно проверить согласие и suppression (за время в очереди человек мог отписаться), отрендерить шаблон, вставить `email_messages` с `dedup_key = <категория>:{user}:{period}` (`ON CONFLICT DO NOTHING` — повтор задачи не дублирует письмо), взять токен из `rl:email:news`, отправить через `EmailSender.send`.
+4. **Ответ провайдера:** успех → `sent` и `provider_message_id`; `429` или временная ошибка → повтор с backoff и `Retry-After`; постоянная → `failed`. При превышении стоп-порогов прогрева (§17.7) — пауза кампании (флаг в Valkey) и алерт.
+
+**Шаги — вебхук провайдера:**
+5. Проверить подпись (`EmailSender.parse_webhook`); неверная → `401`. Каждое событие — `INSERT INTO email_events … ON CONFLICT (provider_event_id) DO NOTHING`, задача `email.apply_event:{id}`, **сразу `200`**.
+6. **Применение** (идемпотентно):
+   - `delivered` → `email_messages.status = delivered`;
+   - `bounce_hard` → `bounced`, suppression `scope = all` (`reason = hard_bounce`), `user_emails.bounced_at = now()`, in-app баннер «Письма не доходят»;
+   - `bounce_soft` → счётчик по адресу; 3 за 7 дней → как hard (`reason = soft_bounce_repeated`);
+   - `complaint` → `complained`, suppression `scope = non_essential`, согласия на `weekly_digest` и `news` снимаются (запись в `email_consent_log`, `source = complaint`);
+   - `unsubscribe` (если отписка пришла через провайдера) → то же, что отписка по нашей ссылке (§17.6).
+7. Отписка по `List-Unsubscribe-Post`: проверить HMAC токена, снять согласие категории, записать в журнал, ответить `200` — без входа в аккаунт.
+
+**Выход:** письма в `email_messages`, обновлённые suppression и согласия, метрики `email_sent_total{stream,template}`, `email_bounce_rate{stream}`, `email_complaint_rate{stream}` (§7.4).
+
+**Что кэшируется:** состояние token bucket и флаг паузы кампании — в Valkey; согласия и suppression не кэшируются (проверяются в момент отправки).
+
 ---
 
 ## 12. Монетизация и коммерческая составляющая
@@ -2161,8 +2311,9 @@ CREATE TABLE notification_deliveries (
 8. Атрибуция Last.fm на страницах с импортированными данными; страница «удалить аккаунт и данные» (и отдельно — «удалить импорт Last.fm»).
 9. Экраны профиля, меню аккаунта, in-app уведомления и настройки — по таблице приоритетов §9.12.
 10. Telegram-бот: привязка, `/now`, `/stats`, `/top`, `/streak` и уведомления (§13.9).
+11. **Email (§17.12):** привязка, подтверждение и смена адреса (с уведомлением старого); сессии сайта и «выйти везде»; уведомления безопасности; письмо `sync_problem`; SPF/DKIM/DMARC, обработка bounce и жалоб. Сброс пароля и вход по паролю — реализованы, включаются флагом после ответа юриста (§16, п. 9).
 
-**Не входит:** Audioscrobbler 1.2, собственные плагины к плеерам (§16), провайдеры Яндекса, VK и Звука, лента активности, рекомендации (этап 2, §9.10), комментарии и сообщения, desktop-клиент, видео и Steam, ручное редактирование и слияние треков (только в админке).
+**Не входит:** email-сводки и новости (later, §17.12), Audioscrobbler 1.2, собственные плагины к плеерам (§16), провайдеры Яндекса, VK и Звука, лента активности, рекомендации (этап 2, §9.10), комментарии и сообщения, desktop-клиент, видео и Steam, ручное редактирование и слияние треков (только в админке).
 
 ---
 
@@ -2172,6 +2323,8 @@ CREATE TABLE notification_deliveries (
 - Токены провайдеров (будущие Yandex/Zvuk) шифруются на уровне приложения (`secret_enc`, ключ вне БД). Session key Last.fm не храним.
 - **API-токены клиентов** (§3.4) храним только как `sha256`, показываем один раз; Scrobble API — только HTTPS, токен — в заголовке, а не в URL (поэтому не поддерживаем Audioscrobbler 1.2, §3.2). В логах токены маскируются. Подозрительная активность по токену (лимиты, всплески, §11.1) → уведомление владельцу и возможность отозвать токен одним нажатием.
 - Telegram: `telegram_user_id` и `chat_id` — ПДн в РФ; вебхук проверяется по `secret_token` (§13.9).
+- **Email и сессии (§17.11):** адреса, журнал писем и сессии — ПДн в РФ; провайдер писем — обработчик по поручению в РФ; одноразовые ссылки и cookie сессий хранятся только как `sha256`; пароли (если вход по паролю включат) — argon2id; после сброса пароля отзываются все сессии сайта, но не API-токены клиентов (§17.3); suppression-список хранит HMAC адреса, а не сам адрес.
+- Согласие на обработку ПДн — отдельным документом (152-ФЗ ст. 9 ч. 1 в ред. 156-ФЗ, с 01.09.2025), согласие на рекламные рассылки — отдельно от него (38-ФЗ ст. 18, §17.6).
 - `@username` публичен, внутренний `users.id` наружу не отдаётся (§2.5).
 - Удаление аккаунта — каскадное, включая секции `listens` (`DELETE … WHERE user_id`), бэкапы ротируются.
 
@@ -2190,7 +2343,7 @@ CREATE TABLE notification_deliveries (
 8. Синхронизировать ли лайки Scrobb обратно в Last.fm (`track.love`): для этого придётся хранить session key.
 
 **Аккаунты и право**
-9. **Email+пароль** как способ входа: допустим ли без российского номера, VK ID или Яндекс ID? Нужна консультация юриста (R3).
+9. **Email+пароль** как способ входа: допустим ли без российского номера, VK ID или Яндекс ID? Допустим ли хотя бы как дополнительный вход для аккаунта, уже прошедшего VK ID / Яндекс ID / телефон (§17.1)? Нужна консультация юриста (R3). От ответа зависят флаги `AUTH_EMAIL_PASSWORD` и `AUTH_EMAIL_SIGNUP` и запуск сброса пароля.
 10. **@username:** окончательный список зарезервированных имён; срок hold старого имени (90 дней?) и частота смены (раз в 30 дней?); разрешать ли точку (риск путаницы `ivan.petrov` / `ivanpetrov`).
 11. Комментарии (Shoutbox) и личные сообщения: обязанности владельца площадки с пользовательским контентом в РФ (статус ОРИ, модерация) — к юристу.
 
@@ -2223,3 +2376,271 @@ CREATE TABLE notification_deliveries (
 
 **Дизайн**
 31. **Дизайн-система** (§10.7): конкретные значения цветов (hex) для семантических ролей; выбор гарнитур (1–2, качество кириллицы, лицензия); нужна ли тёмная тема и когда.
+
+**Email (§17)**
+32. **Провайдер отправки:** выбрать по критериям §17.8 — юрисдикция и серверы в РФ, договор поручения обработки ПДн, API/SMTP, подписанные вебхуки bounce/жалоб/отписок, DKIM нашим доменом и свой Return-Path, раздельные потоки, отключаемый трекинг, цена на объёмах этапа 1. Сравнить 2–3 варианта и проверить доставку в крупные почтовые сервисы, популярные в РФ.
+33. Тексты согласий: отдельный документ согласия на обработку ПДн и отдельные согласия на сводки и новости (152-ФЗ, 38-ФЗ); является ли еженедельная сводка без упоминания Pro рекламой; сколько хранить журнал отозванных согласий — к юристу (§17.6, §17.10).
+34. Какие постмастер-инструменты и петли обратной связи по жалобам подключить, нужна ли проверка «я не робот» на форме сброса пароля при атаках (§17.3, §17.7).
+35. Доверять ли адресу, который вернули VK ID / Яндекс ID с пометкой «подтверждён», или всегда подтверждать своим письмом (предложение — всегда своим, §17.2).
+36. Пороги прогрева и стоп-пороги (hard bounce > 2%, жалобы > 0,1%) — взять из требований выбранного провайдера и почтовых сервисов, сейчас не проверено (§17.7).
+37. Удалять ли через 30 дней неподтверждённые аккаунты, созданные по email (если такая регистрация появится), и что делать с уже накопленными скробблами (§17.2).
+
+---
+
+## 17. Email: подтверждение адреса, сброс пароля, рассылки
+
+> Статус: **черновик-предложение**. Пошаговые алгоритмы — §11.8–§11.10, таблицы — §17.10. Провайдер отправки не выбран и намеренно не называется: здесь только требования к нему (§17.8), выбор — открытый вопрос (§16, п. 32).
+
+### 17.1 Роль email и связь со входом
+
+- **Email в Scrobb — это канал связи и (возможно) второй способ входа, а не основная учётная запись.** Регистрация и вход по-прежнему идут через VK ID, Яндекс ID или телефон (R3, §6.1). Адрес нужен для уведомлений безопасности, служебных писем (`sync_problem`, оплаты, `pro_expiring`), восстановления доступа и — только по согласию — для сводок и новостей.
+- **Вход по email и паролю** (`auth_identities.provider = 'email'`) допустим ли по 149-ФЗ — открытый вопрос к юристу (§16, п. 9). Поэтому он спроектирован полностью, но включается флагом `AUTH_EMAIL_PASSWORD` (по умолчанию выключен). Предлагаемый безопасный вариант: пароль можно задать только аккаунту, у которого уже есть вход через VK ID, Яндекс ID или телефон, — тогда пользователь хотя бы раз прошёл допустимую идентификацию (**не проверено** юридически). Самостоятельная регистрация по email и паролю — отдельный флаг `AUTH_EMAIL_SIGNUP`, тоже выключен.
+- Модуль бэкенда — **`email`**: адреса и их подтверждение, одноразовые токены, шаблоны, отправка через интерфейс `EmailSender` (§17.8), приём вебхуков доставки, suppression-список. Уведомления (§9.8) используют его как один из каналов доставки.
+
+### 17.2 Адрес и его подтверждение
+
+**Один адрес на пользователя** (`user_emails`, §17.10). Адрес считается рабочим только после подтверждения (`verified_at`). Подтверждённый адрес уникален среди подтверждённых; неподтверждённый ни у кого не «занимает» адрес, поэтому чужой email нельзя заблокировать, просто вписав его. Адрес, который вернули VK ID или Яндекс ID, только предзаполняет поле — подтверждаем всегда своим письмом (§16, п. 35).
+
+**Одноразовые токены** (`email_tokens`, общие для всех писем со ссылкой-действием):
+
+| `purpose` | Кому уходит | TTL | Что делает |
+|---|---|---|---|
+| `verify_email` | Новый адрес | 24 ч | Подтверждает адрес |
+| `change_email` | Новый адрес при смене | 24 ч | Подтверждает и применяет смену |
+| `revert_email` | Старый адрес при смене | 7 дней | «Это был не я»: отменяет смену и возвращает старый адрес (§11.8) |
+| `reset_password` | Подтверждённый адрес | 30 мин | Позволяет задать новый пароль (§17.3) |
+
+Правила для всех токенов:
+- 32 случайных байта (CSPRNG) в base64url; в БД — только `sha256(token)`, сам токен существует только в письме.
+- **Одноразовость:** погашение — один атомарный `UPDATE … SET used_at = now() WHERE token_hash = $1 AND used_at IS NULL AND expires_at > now() RETURNING …`. Новый токен того же назначения гасит все прежние неиспользованные.
+- **Токен — во фрагменте ссылки** (`https://scrobb.ru/auth/email/verify#t=<token>`): фрагмент не попадает в логи сервера, прокси и в `Referer`. Страница показывает кнопку «Подтвердить», и только нажатие отправляет `POST` с токеном. Так ссылку не «погасит» почтовый сканер, который открывает ссылки заранее. На страницах действий — `Referrer-Policy: no-referrer` и никаких сторонних ресурсов.
+- Ошибка для просроченного, использованного и несуществующего токена — одна и та же: «Ссылка устарела, запросите новую».
+
+**Что можно и чего нельзя с неподтверждённым адресом:**
+
+| Ситуация | Можно | Нельзя (до подтверждения) |
+|---|---|---|
+| Аккаунт через VK ID / Яндекс ID / телефон, адрес не подтверждён | Всё, что даёт аккаунт | Получать на этот адрес что-либо, кроме письма подтверждения; задать пароль и сбросить его; подписаться на сводки и новости; использовать адрес для писем об оплате (тогда ЮKassa спрашивает email для чека на своей странице, §12.4) |
+| Аккаунт, зарегистрированный по email и паролю (только при `AUTH_EMAIL_SIGNUP`, §17.1), адрес не подтверждён | Войти, выбрать @username, настроить профиль, создать **один** API-токен и скробблить (данные сохраняются) | Публичный профиль, поиск и лидерборды; подписки на других; привязка Telegram; импорт Last.fm (тратит общий бюджет запросов, §4.1); оплаты; больше одного API-токена. Без подтверждения такой аккаунт напоминает о себе на 1-й и 7-й день и **удаляется через 30 дней** (минимизация ПДн, 152-ФЗ) с предупреждением за 3 дня — о нём пишем в интерфейсе, а не на неподтверждённый адрес (§16, п. 37) |
+
+**Повторная отправка письма подтверждения:** не чаще раза в 60 с и не больше 5 раз в сутки на пользователя, не больше 20 в час с одного IP. Кнопка показывает обратный отсчёт. Превышение — `429` с `Retry-After`.
+
+**Смена адреса** (§11.8): только в «свежей» сессии (вход или повторная проверка не позже 15 минут назад, §17.4). Письмо `change_email` уходит на новый адрес, а старый подтверждённый адрес сразу получает уведомление «Запрошена смена адреса на i***@example.ru» со ссылкой `revert_email`. После подтверждения старый адрес получает ещё одно письмо «Адрес изменён» с той же ссылкой отмены (7 дней). Это защищает от захвата аккаунта: даже если злоумышленник получил сессию, владелец старого адреса может вернуть всё назад.
+
+### 17.3 Пароль и его сброс
+
+Только при включённом входе по паролю (`AUTH_EMAIL_PASSWORD`, §17.1).
+
+- **Хранение:** **argon2id**, стартовые параметры не ниже рекомендации OWASP — `m = 19 MiB, t = 2, p = 1` ([Password Storage Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html)); на целевом сервере калибруем до ≈100–200 мс на хэш. Хэш хранится строкой PHC (`$argon2id$v=19$m=…`) вместе с параметрами; при входе, если параметры устарели, пароль перехэшируется. Хэширование выполняется в пуле потоков, а не в event loop FastAPI.
+- **Требования к паролю:** 12–128 символов, без правил «обязательно цифра и спецсимвол»; запрет паролей из локального списка частых и утёкших (проверка на нашем сервере, без отправки хэшей наружу); нельзя использовать @username или адрес.
+- **Лимиты входа:** не больше 5 неудачных попыток за 15 минут на пару «аккаунт + IP» и 30 за 10 минут с IP; дальше — растущая задержка. Ответ на ошибку одинаковый для «нет такого адреса» и «неверный пароль».
+
+**Сброс пароля** (§11.9):
+- **Форма запроса не раскрывает, есть ли адрес.** Ответ всегда один: «Если этот адрес привязан к аккаунту, мы отправили письмо». Вся работа (поиск пользователя, токен, письмо) уходит в фоновую задачу, поэтому время ответа тоже не выдаёт результат.
+- Письмо уходит **только на подтверждённый адрес**. Если адрес подтверждён, но пароля у аккаунта нет, приходит письмо «У аккаунта нет пароля — войдите через VK ID / Яндекс ID / телефон». Это видит только владелец адреса, поэтому факт существования аккаунта никому не раскрывается. Для неизвестных и неподтверждённых адресов писем нет.
+- **Токен** `reset_password`: только хэш, TTL **30 минут**, одноразовый, новый запрос гасит старый.
+- **Лимиты:** на адрес (по HMAC-хэшу) — 3 запроса в час и 10 в сутки; с IP — 10 в час. Сверх лимита ответ тот же, письмо просто не отправляется (метрика `email_reset_throttled_total`).
+- **После смены пароля:**
+  - **все сессии сайта отзываются** (`user_sessions.revoked_at`), включая сессии на других устройствах; пользователь входит заново (после сброса — сразу новой сессией);
+  - **API-токены клиентов-скробблеров (§3.4) и их 2.0-сессии `sk` не отзываются.** Они не выводятся из пароля (`auth.getMobileSession` принимает API-токен, а не пароль), это отдельные учётные данные устройств. Массовый отзыв молча остановил бы скробблинг на всех плеерах, а пользователь мог бы не заметить этого днями. Вместо этого письмо о смене пароля показывает число активных токенов и ведёт в «Приложения» с кнопкой «Отозвать все токены»;
+  - привязка Telegram не отзывается (бот не даёт доступа к сайту, §13.1), но о привязке нового Telegram всегда приходит уведомление безопасности (§17.4);
+  - уходит уведомление безопасности `password_changed` (§17.4).
+- Смена пароля из настроек требует текущий пароль, отзывает все сессии, **кроме текущей**, и шлёт то же уведомление.
+
+### 17.4 Сессии и уведомления безопасности
+
+- **Сессии сайта** — таблица `user_sessions` (§17.10): случайный токен в cookie `httpOnly; Secure; SameSite=Lax`, в БД — только `sha256`; кэш проверки — в Valkey на 60 с со сбросом при отзыве (как у API-токенов, §11.1). Срок — 30 дней со скользящим продлением. Поле `authenticated_at` — время последней полной проверки личности: смена адреса, пароля, способов входа и удаление аккаунта требуют, чтобы оно было не старше 15 минут, иначе — повторный вход.
+- В «Настройки → Аккаунт» — список активных сессий (устройство по `User-Agent`, IP, последний визит) и кнопка «Выйти на всех устройствах».
+- **Уведомления безопасности** (`security_alert`, §9.8) — всегда включены, отключить нельзя: in-app + email (если адрес подтверждён) + Telegram (если привязан). Поводы в MVP: `password_changed`, `email_change_requested` / `email_changed` (на старый адрес), `login_method_linked` / `login_method_unlinked`, `telegram_linked`, `account_deletion_requested`. Later: вход с нового устройства. В письме: что произошло, когда (в TZ пользователя), IP и браузер, и ссылка «Это был не я» (сброс пароля, отзыв сессий, связь с поддержкой).
+
+### 17.5 Категории писем и потоки
+
+| Категория | Примеры | Поток / адрес отправителя | Согласие | Отписка |
+|---|---|---|---|---|
+| **Транзакционные — безопасность и доступ** | `verify_email`, `change_email`, `revert_email`, `reset_password`, `security_alert` | `tx` · `noreply@mail.scrobb.ru` | Не нужно: письмо запросил пользователь или оно защищает аккаунт | Нельзя |
+| **Транзакционные — служебные** | `sync_problem`, письмо «оплата получена, Pro до …» (фискальный чек отдельно присылает ЮKassa, §12.4), спасибо за донат, `pro_expiring` | `tx` · `noreply@mail.scrobb.ru` | Не нужно | Можно отключить по типу в матрице уведомлений (§9.9); ссылка на настройки в каждом письме |
+| **Несервисные: сводки** | Еженедельная сводка «Ваша неделя в Scrobb» (по `listening_reports`, §9.5) | `news` · `digest@news.scrobb.ru` | **Opt-in**, по категории `weekly_digest` | One-click (§17.6) |
+| **Несервисные: новости** | Новые функции, опросы, Pro — это может быть **рекламой** | `news` · `news@news.scrobb.ru` | **Opt-in**, по категории `news`; предварительное согласие на рекламу по 38-ФЗ ст. 18 ч. 1 ([Гарант](https://base.garant.ru/12145525/a573badcfa856325a7f6c5597efaaedf/)) | One-click (§17.6) |
+
+- **Ответ на письма** (`Reply-To`) — `support@scrobb.ru`; `noreply@` входящие не читает.
+- Сводки не содержат рекламы Pro: тогда они остаются информационными. Всё рекламное — только в категории `news`.
+- Транзакционный и несервисный потоки разделены на всех уровнях: поддомены и DKIM-ключи (§17.7), очереди и лимиты (§17.8), а при возможности — и IP-пулы у провайдера. Жалобы на новости не должны мешать доставке письма сброса пароля.
+
+### 17.6 Согласия и отписка
+
+- **Согласие — только явное:** на странице регистрации и в «Настройки → Уведомления» — **отдельные неотмеченные** галочки «Еженедельная сводка на почту» и «Новости Scrobb (могут содержать рекламу)». Согласие на обработку ПДн оформляется отдельно от них и от пользовательского соглашения: с 01.09.2025 152-ФЗ требует оформлять согласие на обработку ПДн отдельно от иных документов (ст. 9 ч. 1 в ред. 156-ФЗ, [КонсультантПлюс](https://www.consultant.ru/document/cons_doc_LAW_61801/6c94959bc017ac80140621762d2ac59f6006b08c/)). Форма и тексты согласий — к юристу (§16, п. 33).
+- Согласие действует только для **подтверждённого** адреса: подтверждение адреса одновременно служит double opt-in.
+- **Текущее состояние** — в `user_preferences.notifications.email_marketing` (§9.9), **журнал** для доказательства согласия (38-ФЗ: бремя доказывания на рассылающем) — append-only `email_consent_log`: категория, дано или отозвано, источник (`signup`, `settings`, `unsubscribe_link`, `complaint`, `admin`), версия текста согласия, IP, `User-Agent`, время.
+- **One-click unsubscribe** в каждом письме потока `news` (и в служебных — для их типа):
+  - заголовки `List-Unsubscribe: <https://scrobb.ru/u/<token>>` ([RFC 2369](https://www.rfc-editor.org/rfc/rfc2369)) и `List-Unsubscribe-Post: List-Unsubscribe=One-Click` ([RFC 8058](https://www.rfc-editor.org/rfc/rfc8058)); оба заголовка покрыты DKIM-подписью;
+  - `<token>` — HMAC-подписанные `user_id`, категория и id письма, без срока годности и без входа в аккаунт;
+  - `POST` на этот адрес (его делает почтовый клиент) отписывает сразу и возвращает `200`; `GET` (ссылка «Отписаться» в подвале письма) показывает страницу с кнопкой — чтобы сканеры ссылок не отписывали людей;
+  - отписка действует **немедленно** (38-ФЗ требует немедленно прекратить рассылку по требованию), пишется в `email_consent_log` и снимает письма этой категории из очереди.
+
+### 17.7 Доставляемость
+
+- **Поддомены:** `mail.scrobb.ru` — транзакционный поток, `news.scrobb.ru` — сводки и новости. Репутация у них отдельная. Основной домен `scrobb.ru` сам рассылок не шлёт (только почтовый ящик поддержки).
+- **SPF** ([RFC 7208](https://www.rfc-editor.org/rfc/rfc7208)) — на каждом отправляющем поддомене: только серверы выбранного провайдера и `-all`. На `scrobb.ru` — только то, что реально отправляет почту поддержки.
+- **DKIM** ([RFC 6376](https://www.rfc-editor.org/rfc/rfc6376)) — ключи 2048 бит, свой селектор на каждый поток, подпись доменом отправителя (`d=mail.scrobb.ru` / `d=news.scrobb.ru`) для выравнивания с DMARC. Ротация — раз в 6–12 месяцев через новый селектор.
+- **DMARC** ([RFC 7489](https://www.rfc-editor.org/rfc/rfc7489)) — `_dmarc.scrobb.ru` с отчётами `rua` на отдельный ящик; старт с `p=none`, после 2–4 недель чистых отчётов — `quarantine`, затем `reject` (и `sp=` для поддоменов).
+- **Прочее:** `Message-ID` на своём домене, `Auto-Submitted: auto-generated` в транзакционных письмах (чтобы не получать автоответы), ссылки — только на `scrobb.ru` (без сокращателей и трекинговых редиректов), **без пикселей отслеживания открытий и без подмены ссылок** — вовлечённость меряем по активности на сайте.
+- **Прогрев:** транзакционный поток растёт естественно с регистрациями. Поток `news` включаем не раньше, чем через 2–4 недели стабильной работы `tx`, первыми письмами — самым активным пользователям (заходили за 7 дней), с ростом объёма примерно вдвое в день от ~100 писем. Стартовые стоп-пороги (**не проверено**, калибруются, §16, п. 36): hard bounce > 2% или жалобы > 0,1% за отправку — пауза потока и разбор.
+- **Bounce и жалобы** (вебхуки провайдера, §11.10):
+  - **hard bounce** → suppression `scope = all` для адреса, `user_emails.bounced_at`, баннер в интерфейсе «Письма на этот адрес не доходят — укажите другой»;
+  - **soft bounce** → повторы делает провайдер; 3 soft bounce за 7 дней подряд считаются hard;
+  - **жалоба (FBL)** → suppression `scope = non_essential` (дальше уходят только письма безопасности и запрошенные пользователем — подтверждение, сброс), все согласия на сводки и новости снимаются с записью `source = complaint`;
+  - suppression проверяется перед **каждой** отправкой в модуле `email`, а не только у провайдера.
+- Подключить постмастер-инструменты крупных почтовых сервисов, популярных в РФ (статистика репутации, обратная связь по жалобам) — выбор и порядок подключения — §16, п. 34.
+
+### 17.8 Отправка: интерфейс `email`, очереди, провайдер
+
+**Интерфейс** — по аналогии с `jobs` (§6.3): код приложения не знает о конкретном провайдере.
+
+```python
+@dataclass(frozen=True, slots=True)
+class EmailMessage:
+    to: str
+    stream: Literal["tx", "news"]
+    template: str                    # "verify_email", "security_alert", "weekly_digest", …
+    locale: str = "ru"
+    context: dict = field(default_factory=dict)
+    category: str | None = None      # для отписки и suppression: "weekly_digest", "news", тип уведомления
+    dedup_key: str | None = None     # идемпотентность: "digest:{user}:{2026-W40}"
+
+class EmailSender(Protocol):
+    async def send(self, rendered: "RenderedEmail") -> "SendResult": ...       # provider_message_id или ошибка (временная/постоянная)
+    def parse_webhook(self, headers: Mapping[str, str], body: bytes) -> list["EmailEvent"]: ...  # с проверкой подписи
+```
+
+- Адаптеры: `smtp` (универсальный, SMTP submission с TLS), `api` (HTTP API выбранного провайдера), `catcher` для разработки (ниже), `memory` для тестов. Выбор — `EMAIL_BACKEND`.
+- **Отправка всегда через очередь** (`jobs`): API-запрос создаёт строку `email_messages` (`queued`) и задачу. Очереди: `email_tx` — с приоритетом выше импорта Last.fm и агрегатов; `email_news` — самая низкая. Пачка рассылки никогда не задерживает письмо сброса пароля.
+- **Троттлинг** — token bucket в Valkey на поток (`rl:email:tx`, `rl:email:news`; стартовые значения задаются конфигом под тариф провайдера и график прогрева). Ответ провайдера `429` / временная ошибка → повтор с backoff и `Retry-After`; постоянная ошибка → `failed` без повторов; после исчерпания попыток — `jobs_dead` (§2.3).
+- **Пакетные рассылки** (сводки, новости, §11.10): планировщик ставит задачи пачками по 100–500 получателей волнами по TZ; каждая пачка повторно проверяет согласие и suppression прямо перед отправкой; `email_messages.dedup_key` UNIQUE защищает от двойной отправки при повторе задачи.
+
+**Требования к провайдеру** (выбор — §16, п. 32):
+- юрисдикция РФ и обработка/хранение данных писем на серверах в РФ (адрес и содержание письма — ПДн, R4, 152-ФЗ), договор поручения обработки ПДн (ст. 6 ч. 3);
+- HTTP API и/или SMTP submission с TLS;
+- **вебхуки** о доставке, hard/soft bounce, жалобах и отписках — с подписью (HMAC или аналог) и повторами доставки;
+- собственный домен отправителя: DKIM-подпись нашим доменом, настраиваемый Return-Path на нашем поддомене;
+- раздельные потоки (транзакционный и массовый) с отдельной репутацией, позже — выделенный IP;
+- поддержка заголовков `List-Unsubscribe` / `List-Unsubscribe-Post` без переписывания, возможность отключить трекинг открытий и кликов;
+- API suppression-списка (или хотя бы выгрузка), журнал отправок, понятные лимиты и цена при объёмах этапа 1.
+
+**Локальная разработка:** в `docker-compose.dev` — локальный SMTP-перехватчик с веб-интерфейсом: принимает все письма, ничего не отправляет наружу и показывает их (HTML, текст, заголовки) в браузере. `EMAIL_BACKEND=catcher` указывает на него; на staging разрешена отправка только на адреса из allow-list.
+
+### 17.9 Шаблоны
+
+- Каждое письмо — **два варианта: plain-text и HTML** (`multipart/alternative`); текстовый — полноценный, а не «откройте HTML». Тема, текст и HTML — из одного шаблона: `templates/email/<имя>/{subject.txt, body.txt, body.html}` + общий layout.
+- **Язык — русский**, но всё готово к i18n: строки — в том же каталоге сообщений, что и интерфейс (ICU MessageFormat, склонения «1 прослушивание / 5 прослушиваний», §9.1), даты и время — в TZ получателя, `locale` — параметр письма.
+- **Минимальный HTML:** одна колонка, ширина до 600 px, стили инлайн, системные шрифты, без внешних картинок и скриптов, корректно в тёмной теме почтовых клиентов; цвета и отступы — из дизайн-токенов §10 (те же роли `text`, `accent`, `surface`).
+- Тема — короткая и конкретная («Подтвердите адрес для Scrobb»), без капса и восклицательных знаков. Одно главное действие — кнопка и та же ссылка текстом.
+- **Подвал:** почему пришло письмо, ссылка на настройки уведомлений, для `news` — «Отписаться», данные оператора.
+- HTML-шаблоны — с автоэкранированием; превью всех шаблонов в каталоге компонентов (§10.6) и снапшот-тесты в CI.
+
+### 17.10 Модель данных
+
+```sql
+-- Пароль (только при AUTH_EMAIL_PASSWORD, §17.1): строка auth_identities с provider = 'email', subject = подтверждённый адрес.
+ALTER TABLE auth_identities ADD COLUMN password_hash text;   -- argon2id в формате PHC; NULL у других провайдеров
+
+CREATE TABLE user_emails (
+  user_id     bigint PRIMARY KEY REFERENCES users ON DELETE CASCADE,
+  email       citext NOT NULL,
+  verified_at timestamptz,                -- NULL = не подтверждён (§17.2)
+  bounced_at  timestamptz,                -- hard bounce: адрес не принимает почту (§17.7)
+  updated_at  timestamptz NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX ON user_emails (email) WHERE verified_at IS NOT NULL;   -- уникален только подтверждённый
+
+CREATE TABLE email_tokens (               -- одноразовые ссылки (§17.2)
+  id         bigserial PRIMARY KEY,
+  user_id    bigint NOT NULL REFERENCES users ON DELETE CASCADE,
+  purpose    text   NOT NULL,             -- verify_email | change_email | revert_email | reset_password
+  token_hash bytea  UNIQUE NOT NULL,      -- sha256(token); сам токен не храним
+  email      citext NOT NULL,             -- адрес, на который ушёл токен (для change_email — новый)
+  payload    jsonb,                       -- revert_email: {"restore_email": "…"}
+  expires_at timestamptz NOT NULL,
+  used_at    timestamptz,                 -- погашен или заменён новым токеном
+  created_at timestamptz NOT NULL DEFAULT now(),
+  request_ip inet
+);
+CREATE INDEX ON email_tokens (user_id, purpose) WHERE used_at IS NULL;
+-- Погашенные и просроченные токены удаляются через 7 дней.
+
+CREATE TABLE user_sessions (              -- сессии сайта (§17.4)
+  id               bigserial PRIMARY KEY,
+  user_id          bigint NOT NULL REFERENCES users ON DELETE CASCADE,
+  token_hash       bytea  UNIQUE NOT NULL,
+  auth_method      text   NOT NULL,       -- vkid | yandex | phone | email
+  authenticated_at timestamptz NOT NULL,  -- последняя полная проверка (для «свежей» сессии)
+  created_at       timestamptz NOT NULL DEFAULT now(),
+  last_seen_at     timestamptz,
+  expires_at       timestamptz NOT NULL,
+  revoked_at       timestamptz,
+  ip inet, user_agent text
+);
+CREATE INDEX ON user_sessions (user_id) WHERE revoked_at IS NULL;
+
+CREATE TABLE email_messages (             -- журнал исходящих писем
+  id                  bigserial PRIMARY KEY,
+  user_id             bigint REFERENCES users ON DELETE SET NULL,
+  notification_id     bigint REFERENCES notifications ON DELETE SET NULL,   -- если письмо — канал уведомления (§9.8)
+  to_email            citext NOT NULL,
+  stream              text NOT NULL,      -- tx | news
+  template            text NOT NULL,
+  category            text,
+  dedup_key           text UNIQUE,
+  status              text NOT NULL DEFAULT 'queued',  -- queued|sent|delivered|bounced|complained|failed|suppressed
+  provider_message_id text UNIQUE,
+  error               text,
+  created_at          timestamptz NOT NULL DEFAULT now(),
+  sent_at             timestamptz
+);
+-- Хранение: 90 дней, затем строки удаляются (остаются агрегированные метрики §7.4).
+
+CREATE TABLE email_events (               -- вебхуки провайдера (§11.10)
+  id                bigserial PRIMARY KEY,
+  provider_event_id text UNIQUE NOT NULL, -- идемпотентность повторных вебхуков
+  message_id        bigint REFERENCES email_messages ON DELETE SET NULL,
+  type              text NOT NULL,        -- delivered | bounce_hard | bounce_soft | complaint | unsubscribe
+  payload           jsonb,
+  received_at       timestamptz NOT NULL DEFAULT now(),
+  processed_at      timestamptz
+);
+
+CREATE TABLE email_suppressions (         -- кому не отправлять (§17.7)
+  email_hash bytea PRIMARY KEY,           -- HMAC-SHA256(ключ вне БД, нормализованный адрес): сам адрес не храним
+  scope      text NOT NULL,               -- all | non_essential
+  reason     text NOT NULL,               -- hard_bounce | soft_bounce_repeated | complaint | manual
+  created_at timestamptz NOT NULL DEFAULT now(),
+  source_event_id bigint REFERENCES email_events ON DELETE SET NULL
+);
+
+CREATE TABLE email_consent_log (          -- доказательство согласий на сводки и новости (§17.6), append-only
+  id           bigserial PRIMARY KEY,
+  user_id      bigint NOT NULL REFERENCES users ON DELETE CASCADE,
+  category     text NOT NULL,             -- weekly_digest | news
+  granted      boolean NOT NULL,
+  source       text NOT NULL,             -- signup | settings | unsubscribe_link | complaint | admin
+  text_version text NOT NULL,             -- версия формулировки согласия
+  ip inet, user_agent text,
+  created_at   timestamptz NOT NULL DEFAULT now()
+);
+```
+
+- `email_suppressions` переживает удаление аккаунта: иначе после повторной регистрации на адрес, с которого была жалоба, снова пойдут письма. Поэтому хранится не адрес, а его HMAC. Тот же HMAC — ключ лимитов на сброс пароля (§17.3).
+- Текущие согласия и включённые email-уведомления — в `user_preferences.notifications` (§9.9); журнал `email_consent_log` удаляется вместе с аккаунтом. Сколько хранить доказательства отозванных согласий — вопрос к юристу (§16, п. 33).
+
+### 17.11 Безопасность и ПДн
+
+- Адрес, журнал писем, события доставки и сессии (IP, `User-Agent`) — ПДн, хранятся в РФ (R4); провайдер отправки — обработчик по поручению, в РФ (§17.8). Все сроки хранения — §17.10.
+- В логах приложения адреса маскируются (`i***@example.ru`), токены не логируются вообще.
+- Вебхуки провайдера принимаются только с проверенной подписью (и, если провайдер публикует, с его IP), сохраняются идемпотентно, ответ `200` — сразу, обработка — фоном (как вебхуки ЮKassa, §12.4).
+- Письма безопасности не содержат ссылок, которые выполняют действие без подтверждения на сайте.
+- Все эндпоинты email-модуля — с лимитами частоты (§17.2, §17.3) и метриками (§7.4).
+
+### 17.12 MVP и Later
+
+- **MVP:** привязка и подтверждение адреса, повторная отправка, смена адреса с уведомлением старого и отменой; сессии сайта и «выйти везде»; уведомления безопасности (§17.4); служебные письма `sync_problem` и «спасибо за донат» (когда запущены донаты, §12.3); сброс пароля и вход по паролю — **реализованы, но включаются флагом только после ответа юриста** (§16, п. 9); SPF, DKIM, DMARC (`p=none`) на `mail.scrobb.ru`; вебхуки bounce и жалоб, suppression; шаблоны plain-text + HTML; перехватчик писем для разработки.
+- **Этап 2:** письма об оплате Pro и `pro_expiring` (вместе с Pro, §12.4).
+- **Later:** еженедельная сводка (`weekly_digest`) и новости (`news`) на `news.scrobb.ru` с opt-in и one-click отпиской, прогрев потока; DMARC `reject`; уведомление о входе с нового устройства; выделенный IP.
