@@ -135,10 +135,9 @@ erDiagram
   users ||--o{ username_history : "прежние имена (hold)"
   users ||--o| telegram_links : "бот (не вход)"
   notifications ||--o{ notification_deliveries : "каналы"
-  users ||--o{ subscriptions : "оформляет"
-  plans ||--o{ subscriptions : "тариф"
   users ||--o{ payments : "платит"
-  subscriptions ||--o{ payments : "продления"
+  plans ||--o{ payments : "тариф Pro"
+  payments ||--o{ entitlements : "30 дней Pro на платёж"
   users ||--o{ entitlements : "имеет права"
   users ||--|| privacy_settings : has
   users ||--o{ external_accounts : "привязывает"
@@ -466,25 +465,15 @@ erDiagram
     timestamptz created_at
   }
   plans {
-    text code PK "pro_month|pro_year"
-    interval period
-    int price_kopecks
-  }
-  subscriptions {
-    bigint id PK
-    bigint user_id FK
-    text plan_code FK
-    text status "pending|active|past_due|canceled|expired"
-    timestamptz current_period_end
-    timestamptz grace_until
-    bool cancel_at_period_end
-    text yk_payment_method_id
+    text code PK "pro_30d"
+    interval period "30 days"
+    int price_kopecks "9900"
   }
   payments {
     bigint id PK
     bigint user_id FK
-    bigint subscription_id FK
-    text kind "subscription_initial|subscription_renewal|donation"
+    text plan_code FK "для kind=pro"
+    text kind "pro|donation"
     text yk_payment_id UK
     text idempotence_key UK
     text status
@@ -493,8 +482,9 @@ erDiagram
   entitlements {
     bigint user_id PK
     text feature PK
-    text source PK "subscription|donation|grant"
+    text source PK "pro_payment|donation|grant"
     bigint source_id PK
+    timestamptz valid_from
     timestamptz valid_until
   }
   webhook_events {
@@ -1379,7 +1369,7 @@ CREATE TABLE user_achievements (
 
 ### 9.8 Меню аккаунта и уведомления
 
-**Меню** (по аналогии с Last.fm): аватар + имя + «27 562 прослушивания» → профиль; иконки **уведомления** (с бейджем непрочитанных), **сообщения** (later), **закладки** (объединяем с «Избранным»: `favorites` с `entity_type` = `3` трек / `2` альбом / `1` артист, коды — §2.3), **настройки**; «Выйти». «Upgrade to Pro» не берём. Вместо него — неброская ссылка «Поддержать проект» (донат и подписка Scrobb Pro, §12), без баннеров и всплывающих окон.
+**Меню** (по аналогии с Last.fm): аватар + имя + «27 562 прослушивания» → профиль; иконки **уведомления** (с бейджем непрочитанных), **сообщения** (later), **закладки** (объединяем с «Избранным»: `favorites` с `entity_type` = `3` трек / `2` альбом / `1` артист, коды — §2.3), **настройки**; «Выйти». «Upgrade to Pro» не берём. Вместо него — неброская ссылка «Поддержать проект» (донат и Scrobb Pro — 99 ₽ за 30 дней, §12), без баннеров и всплывающих окон.
 
 **Уведомления:**
 
@@ -1392,6 +1382,7 @@ CREATE TABLE user_achievements (
 | `report_ready` | Сгенерирован недельный отчёт | in-app (Telegram — Later, по умолчанию выключен, §13.4) | — |
 | `sync_problem` | Аккаунт Last.fm стал `private` или `not_found`, лаг синхронизации больше 24 ч; **токен клиента, который писал каждый день, молчит 3 дня** («Web Scrobbler на ноутбуке не присылал данные с 1 октября») | in-app + email | Один раз на смену статуса |
 | `client_connected` | Первый скроббл по новому токену (§3.4) | in-app | Один раз на токен |
+| `pro_expiring` | Pro заканчивается через 3 дня и через 1 день (этап 2, §12.4) | in-app + email (Telegram — по настройкам) | Один раз на каждый порог и срок |
 
 ```sql
 CREATE TABLE notifications (
@@ -1875,17 +1866,23 @@ API: `GET /api/v1/me/recommendations?type=all|artists|albums|tracks&cursor=`, `P
 
 ## 12. Монетизация и коммерческая составляющая
 
-> Статус: **гипотеза**. Цель — не заработать, а **покрыть хостинг и поддержку**. Пользователь согласовал оба инструмента: страницу доната и подписку. Последовательность запуска — §12.5.
+> Статус: **гипотеза**. Цель — не заработать, а **покрыть хостинг и поддержку**. Пользователь согласовал оба инструмента: страницу доната и Scrobb Pro (разовая оплата за 30 дней, §12.2). Последовательность запуска — §12.5.
 
 ### 12.1 Философия
 
 - **Без рекламы, без давления, без платного ядра.** Бесплатная версия щедрая (как бесплатный Last.fm, а по нашим отличиям — даже шире, §9.11). Платные опции — добровольное дополнение для тех, кто хочет поддержать проект.
 - **Что не копируем у Last.fm:** модель апселла Last.fm Pro (баннеры «Upgrade», напоминания, закрытые за оплатой отчёты), Labs, рекламу и концерты. **Scrobb Pro** — лёгкий тариф поддержки, а не способ отнять функции.
-- Без тёмных паттернов: никаких всплывающих окон, таймеров «скидка сгорит», предзаполненных галочек автопродления. Отмена подписки — в один клик в настройках.
+- Без тёмных паттернов: никаких всплывающих окон и таймеров «скидка сгорит». **Автопродления нет** (§12.2): Pro — разовая оплата за 30 дней, деньги без действия пользователя не списываются и отменять нечего.
 
-### 12.2 Подписка Scrobb Pro
+### 12.2 Scrobb Pro
 
-**Цены (утверждены):** **199 ₽/мес** или **1 990 ₽/год** (годовая = 10 месяцев, ≈ 2 месяца в подарок). Запуск — после донатов, см. порядок в §12.5.
+**Цена (утверждена):** **99 ₽ за 30 дней Pro**, разовым платежом.
+- **Без автопродления** и рекуррентных списаний: способ оплаты не сохраняется, каждый период оплачивается вручную.
+- **Годового тарифа пока нет** — один тариф `pro_30d` (§12.4).
+- **Оплата заранее складывается:** каждый платёж добавляет 30 дней к концу уже оплаченного периода (если Pro активен) или к текущему моменту (если нет). Оплаченные дни не сгорают.
+- **Напоминания:** за 3 дня и за 1 день до окончания — «Pro заканчивается … — продлить ещё на 30 дней» (§12.4). Без давления и без повторов сверх этого.
+
+Запуск — после донатов, см. порядок в §12.5.
 
 **Что входит** (только «сверху», по отличиям Scrobb):
 
@@ -1901,15 +1898,15 @@ API: `GET /api/v1/me/recommendations?type=all|artists|albums|tracks&cursor=`, `P
 
 **Оплата — ЮKassa.** Сверено по документации:
 - **Способы оплаты:** банковские карты, **СБП**, кошелёк **ЮMoney** (а также Mir Pay, SberPay, T-Pay и др.).
-- **Автоплатежи (рекуррентные списания):** способ оплаты сохраняется при первом платеже (`save_payment_method: true`), затем списания проводятся с `payment_method_id` без подтверждения пользователя. Периодичность и отключение настраиваются **на нашей стороне** ([автоплатежи](https://yookassa.ru/developers/payment-acceptance/scenario-extensions/recurring-payments/basics), [привязка при платеже](https://yookassa.ru/developers/payment-acceptance/scenario-extensions/recurring-payments/save-payment-method/save-during-payment), [списание](https://yookassa.ru/developers/payment-acceptance/scenario-extensions/recurring-payments/pay-with-saved)).
-- **Ограничения:** у СБП при сохранении способа оплаты показываются только банки, поддерживающие привязку счёта ([СБП](https://yookassa.ru/developers/payment-acceptance/integration-scenarios/manual-integration/other/sbp)). Документация пишет «если ваш магазин настроен для приёма автоплатежей», то есть их, видимо, нужно отдельно включать у ЮKassa (порядок **не проверен**).
+- **Сейчас — только разовые платежи** (Pro и донаты), без сохранения способа оплаты.
+- **Автоплатежи (рекуррентные списания) — Later, сейчас не используем.** Справка на случай, если автопродление понадобится: способ оплаты сохраняется при первом платеже (`save_payment_method: true`), затем списания проводятся с `payment_method_id` без подтверждения пользователя, периодичность и отключение — на нашей стороне ([автоплатежи](https://yookassa.ru/developers/payment-acceptance/scenario-extensions/recurring-payments/basics), [привязка при платеже](https://yookassa.ru/developers/payment-acceptance/scenario-extensions/recurring-payments/save-payment-method/save-during-payment), [списание](https://yookassa.ru/developers/payment-acceptance/scenario-extensions/recurring-payments/pay-with-saved)). У СБП при сохранении способа оплаты показываются только банки, поддерживающие привязку счёта ([СБП](https://yookassa.ru/developers/payment-acceptance/integration-scenarios/manual-integration/other/sbp)); автоплатежи, видимо, нужно отдельно включать у ЮKassa (порядок **не проверен**).
 
 ### 12.3 Страница «Поддержать проект» (донаты)
 
 - **Мягкий вход:** ссылка «Поддержать проект» в меню аккаунта и в подвале (§9.8), без всплывающих окон. На странице — честный рассказ, на что идут деньги (хостинг, бэкапы, домен), и, возможно, публичный счётчик «покрыто N% расходов месяца».
 - **Символические уровни (пример):** 100 / 300 / 500 ₽ + своя сумма (от 50 до 50 000 ₽).
 - **Благодарность:** бейдж «Поддерживает проект · 2026» в профиле (можно скрыть), необязательная строчка в списке поддержавших (только с согласия). **Никаких функциональных преимуществ** за донат.
-- **Технически:** разовые платежи через ту же интеграцию ЮKassa (§12.4), `payments.kind = 'donation'`, без сохранения способа оплаты. Позже на странице доната можно предложить «поддерживать ежемесячно» — это и есть Pro-подписка.
+- **Технически:** разовые платежи через ту же интеграцию ЮKassa (§12.4), `payments.kind = 'donation'`, без сохранения способа оплаты — так же, как Pro (§12.2). На странице доната можно предложить и Pro: «99 ₽ за 30 дней».
 - **Если на старте не хотим своих платежей** — внешние площадки, работающие в РФ:
 
   | Площадка | Комиссия для автора | Источник |
@@ -1925,76 +1922,65 @@ API: `GET /api/v1/me/recommendations?type=all|artists|albums|tracks&cursor=`, `P
 
 **Эндпоинты:**
 - `GET  /api/v1/billing/plans` — публично: тарифы и цены из таблицы `plans`.
-- `POST /api/v1/billing/checkout` `{product: "pro_month"|"pro_year"|"donation", amount?, return_url}`:
+- `POST /api/v1/billing/checkout` `{product: "pro_30d"|"donation", amount?, return_url}` (`amount` — только для доната; цена Pro берётся из `plans`):
   1. создаёт строку в `payments` (`pending`) с ключом идемпотентности (UUID v4);
-  2. отправляет `POST https://api.yookassa.ru/v3/payments` с заголовком `Idempotence-Key`, `capture: true`, `confirmation: {type: "redirect", return_url}`, `metadata: {payment_row_id, user_id}`, `save_payment_method: true` (только для подписки) и данными чека (см. «Чеки 54-ФЗ» ниже);
+  2. отправляет `POST https://api.yookassa.ru/v3/payments` с заголовком `Idempotence-Key`, `capture: true`, `confirmation: {type: "redirect", return_url}`, `metadata: {payment_row_id, user_id}` и данными чека (см. «Чеки 54-ФЗ» ниже). `save_payment_method` не передаём: автоплатежей нет (§12.2);
   3. возвращает `confirmation_url`.
   
   Ключ идемпотентности действует 24 часа, максимум 64 символа; повтор с тем же ключом не создаёт второй платёж ([формат API](https://yookassa.ru/developers/using-api/interaction-format)).
 - `GET  /api/v1/billing/payments/{id}` — статус для страницы возврата («Проверяем оплату…» с поллингом).
-- `GET  /api/v1/billing/subscription` — текущая подписка: статус, `current_period_end`, маска карты, `cancel_at_period_end`.
-- `POST /api/v1/billing/subscription/cancel` — `cancel_at_period_end = true`, доступ сохраняется до конца оплаченного периода; `POST …/resume` — отменить отмену.
+- `GET  /api/v1/billing/pro` — статус Pro: активен ли, `valid_until` (дата окончания с учётом всех оплаченных периодов), история оплат. Эндпоинтов отмены нет: автопродления нет, отменять нечего.
 - `POST /api/v1/webhooks/yookassa` — входящие уведомления.
 
 **Обработка вебхуков** ([документация](https://yookassa.ru/developers/using-api/webhooks)):
 1. **Проверка IP** по официальному списку ЮKassa (`185.71.76.0/27`, `185.71.77.0/27`, `77.75.153.0/25`, `77.75.156.11`, `77.75.156.35`, `77.75.154.128/25`, `2a02:5180::/32`). Реальный IP клиента берётся из `X-Forwarded-For` **только от доверенного прокси** (настройка `trusted_proxies` в Caddy).
 2. Сохранить событие: `INSERT INTO webhook_events (event, object_id, payload) … ON CONFLICT (event, object_id) DO NOTHING`, поставить задачу `billing.apply:{object_id}` и **сразу ответить 200**. При любом другом коде ЮKassa повторяет доставку в течение 24 часов.
 3. Задача **перезапрашивает объект** `GET /v3/payments/{id}`: истиной считается ответ API, а не тело вебхука (так ЮKassa рекомендует проверять подлинность по статусу объекта).
-4. Переход состояния применяется идемпотентно: только «вперёд» (`pending → succeeded/canceled`); если `payments.status` уже финальный — ничего не делаем.
+4. Переход состояния применяется идемпотентно: только «вперёд» (`pending → succeeded/canceled`); если `payments.status` уже финальный — ничего не делаем. `succeeded` для `kind = pro` → начисление 30 дней Pro (ниже).
 
    Дополнительно задача-сверщик раз в час опрашивает платежи в `pending` старше 1 часа — на случай потерянного уведомления.
 
-   События: `payment.succeeded`, `payment.canceled`, `payment_method.active`, `refund.succeeded`.
+   События: `payment.succeeded`, `payment.canceled`, `refund.succeeded`.
 
-**Подписка — состояния:**
+**Pro — состояния пользователя:**
 
 ```mermaid
 stateDiagram-v2
-  [*] --> pending: checkout
-  pending --> active: payment.succeeded
-  pending --> expired: payment.canceled / таймаут 1 ч
-  active --> active: продление успешно
-  active --> past_due: продление не прошло
-  past_due --> active: повтор успешен
-  past_due --> expired: grace закончился (7 дней)
-  active --> canceled: пользователь отменил
-  canceled --> active: resume до конца периода
-  canceled --> expired: current_period_end
-  expired --> pending: новая оплата
+  [*] --> free
+  free --> pending: checkout pro_30d
+  pending --> pro: payment.succeeded, +30 дней от now()
+  pending --> free: payment.canceled или таймаут 1 ч
+  pro --> pro: оплата заранее, +30 дней к valid_until
+  pro --> free: valid_until прошёл
+  free --> pending: новая оплата
 ```
 
-**Продление** (задача `billing.renew` по расписанию раз в час):
-1. Выборка: `status IN ('active','past_due') AND NOT cancel_at_period_end AND current_period_end <= now() + interval '1 day'`.
-2. Списание сохранённым `payment_method_id`. Ключ идемпотентности **детерминированный**: `renew-{subscription_id}-{period_end:%Y%m%d}-{attempt}`, поэтому повтор задачи не спишет дважды.
-3. Успех → `current_period_start/end` сдвигаются на период, `status = active`.
-4. Неудача → `past_due`, повторы на 1-й, 3-й и 5-й день; `grace_until = period_end + 7 дней`, весь grace-период Pro продолжает работать. Уведомление «Не удалось продлить Pro» (§9.8) со ссылкой «оплатить вручную».
-5. Если пользователь отозвал разрешение на списания (`cancellation_details.reason` = отзыв разрешения), повторы прекращаются и пользователь получает просьбу оплатить заново.
-6. Пользователь получает уведомление **за 3 дня до списания** (вежливость; юридическое требование — §16).
+**Начисление Pro** (в задаче `billing.apply` после `payment.succeeded`, одной транзакцией):
+1. Блокировка пользователя (`SELECT … FROM users WHERE id = $u FOR UPDATE`), чтобы две одновременные оплаты не взяли одну и ту же дату начала.
+2. `start = greatest(now(), max(valid_until))` по правам `pro` пользователя: если Pro ещё активен, новый период начинается в конце текущего — оплата заранее складывается с остатком.
+3. `INSERT INTO entitlements (user_id, feature, source, source_id, valid_from, valid_until) VALUES ($u, 'pro', 'pro_payment', $payment_id, start, start + plans.period) ON CONFLICT DO NOTHING`. Ключ — `payments.id`, поэтому повтор задачи или вебхука не начислит дважды.
+4. Событие `EntitlementsChanged` (сброс кэша прав) и уведомление «Pro активен до 12 ноября».
+5. **Возврат** (`refund.succeeded`): период этого платежа удаляется (если ещё не начался) или обрезается до `now()`, более поздние периоды сдвигаются назад на освободившиеся дни — в той же транзакции. Политика возвратов — §16.
 
-**Истечение Pro — мягкий даунгрейд:** `status = expired`, права `pro.*` в `entitlements` закрываются по `valid_until`. Данные, история и статистика **не теряются**. Pro-настройки (тема, интервал синхронизации) остаются в `user_preferences.pro`, но при чтении действуют значения по умолчанию; при возобновлении подписки всё возвращается. Pro-достижения остаются в профиле как полученные.
+**Напоминания** (задача `billing.remind` раз в час): пользователям, у которых `max(valid_until)` наступает через 3 дня или через 1 день, — уведомление `pro_expiring` (§9.8) со ссылкой «продлить ещё на 30 дней», `dedup_key = pro_expiring:{user}:{valid_until}:{3|1}`. В день окончания — короткое «Pro закончился, данные на месте». Автоматических списаний нет.
 
-**Права (feature flags):** бизнес-код проверяет только `has_feature(user, "pro.extended_stats")` и ничего не знает о платежах. Права выдаются из подписки (`source = 'subscription'`, `valid_until = grace_until | current_period_end`), из доната (`supporter.badge`, бессрочно) или вручную (`source = 'grant'` — бета-тестерам, контрибьюторам). Кэш прав — в Valkey на 5 минут, сбрасывается по событию `EntitlementsChanged`.
+**Истечение Pro — мягкий даунгрейд:** когда `valid_until` последнего оплаченного периода прошёл, право `pro` просто перестаёт действовать (проверка по `valid_until`, отдельная задача не нужна). Данные, история и статистика **не теряются**. Pro-настройки (тема, интервал синхронизации) остаются в `user_preferences.pro`, но при чтении действуют значения по умолчанию; после новой оплаты всё возвращается. Pro-достижения остаются в профиле как полученные.
+
+**Права (feature flags):** бизнес-код проверяет только `has_feature(user, "pro.extended_stats")` и ничего не знает о платежах: любая функция `pro.*` доступна, пока действует право `pro` (`valid_from <= now() < valid_until`). Права выдаются из оплаты Pro (`source = 'pro_payment'`, `source_id = payments.id`, 30 дней на платёж), из доната (`supporter.badge`, бессрочно) или вручную (`source = 'grant'` — бета-тестерам, контрибьюторам). Кэш прав — в Valkey на 5 минут, сбрасывается по событию `EntitlementsChanged`.
+
+**Later — автопродление и годовой тариф.** Сейчас не делаем. Если понадобятся, они добавляются поверх той же модели: сохранение способа оплаты (`save_payment_method`), таблица `subscriptions`, задача продления и состояния `active / past_due / canceled`; права по-прежнему выдаются строками `entitlements`, бизнес-код не меняется.
 
 **Таблицы:**
 
 ```sql
 CREATE TABLE plans (code text PRIMARY KEY, period interval, price_kopecks int NOT NULL, is_active bool DEFAULT true);
 INSERT INTO plans (code, period, price_kopecks) VALUES
-  ('pro_month', '1 month', 19900),    -- 199 ₽/мес (§12.2)
-  ('pro_year',  '1 year',  199000);   -- 1 990 ₽/год
-CREATE TABLE subscriptions (
-  id bigserial PRIMARY KEY, user_id bigint NOT NULL REFERENCES users,
-  plan_code text NOT NULL REFERENCES plans, status text NOT NULL,    -- pending|active|past_due|canceled|expired
-  current_period_start timestamptz, current_period_end timestamptz, grace_until timestamptz,
-  cancel_at_period_end bool NOT NULL DEFAULT false,
-  yk_payment_method_id text, payment_method_title text,              -- «Карта *4444» — маска от ЮKassa
-  created_at timestamptz DEFAULT now(), canceled_at timestamptz
-);
-CREATE UNIQUE INDEX one_live_sub ON subscriptions (user_id) WHERE status IN ('pending','active','past_due','canceled');
+  ('pro_30d', '30 days', 9900);       -- 99 ₽ за 30 дней, разовый платёж (§12.2); годового тарифа нет
 CREATE TABLE payments (
   id bigserial PRIMARY KEY, user_id bigint NOT NULL REFERENCES users,
-  kind text NOT NULL,                     -- subscription_initial|subscription_renewal|donation
-  subscription_id bigint REFERENCES subscriptions,
+  kind text NOT NULL,                     -- pro|donation
+  plan_code text REFERENCES plans,        -- для kind = 'pro'
+  CHECK ((kind = 'pro') = (plan_code IS NOT NULL)),
   yk_payment_id text UNIQUE, idempotence_key text UNIQUE NOT NULL,
   status text NOT NULL,                   -- pending|succeeded|canceled|refunded
   amount_kopecks int NOT NULL, currency char(3) NOT NULL DEFAULT 'RUB',
@@ -2004,8 +1990,9 @@ CREATE TABLE payments (
 CREATE TABLE entitlements (
   user_id bigint, feature text, source text, source_id bigint,
   valid_from timestamptz NOT NULL, valid_until timestamptz,          -- NULL = бессрочно
-  PRIMARY KEY (user_id, feature, source, source_id)
+  PRIMARY KEY (user_id, feature, source, source_id)                  -- pro_payment: source_id = payments.id
 );
+CREATE INDEX ON entitlements (user_id, feature, valid_until);
 CREATE TABLE webhook_events (
   id bigserial PRIMARY KEY, event text, object_id text, payload jsonb,
   received_at timestamptz DEFAULT now(), processed_at timestamptz,
@@ -2015,14 +2002,14 @@ CREATE TABLE webhook_events (
 
 Суммы храним в копейках (целые числа). Отдельная таблица `donations` не нужна: `payments.kind = 'donation'`, бейдж — через `entitlements`.
 
-**Платёжные данные.** Карту пользователь вводит на стороне ЮKassa (redirect на её платёжную форму). Мы **не видим и не храним** номер карты и CVC — только `yk_payment_id`, `payment_method_id`, маску, статусы и суммы. Требования PCI DSS к обработке карт лежат на ЮKassa (сертификацию ЮKassa отдельно **не проверял**). Email для чека — ПДн, хранится в РФ (R4); ЮKassa — российский оператор.
+**Платёжные данные.** Карту пользователь вводит на стороне ЮKassa (redirect на её платёжную форму). Мы **не видим и не храним** номер карты и CVC — только `yk_payment_id`, тип способа оплаты, статусы и суммы; способ оплаты для повторных списаний не сохраняем (§12.2). Требования PCI DSS к обработке карт лежат на ЮKassa (сертификацию ЮKassa отдельно **не проверял**). Email для чека — ПДн, хранится в РФ (R4); ЮKassa — российский оператор.
 
 **Чеки 54-ФЗ и юридическая форма:**
 - **ИП/ООО:** сервис «**Чеки от ЮKassa**» формирует фискальные чеки и отправляет их через ОФД в ФНС и покупателю, без собственной онлайн-кассы ([yookassa.ru/54fz](https://yookassa.ru/54fz/), [документация](https://yookassa.ru/developers/payment-acceptance/receipts/54fz/basics)). Данные чека (описание услуги, сумма, ставка НДС, email) передаются в запросе на создание платежа. Точный состав полей сверяется с документацией при реализации.
-- **Самозанятый (НПД):** ЮKassa подключает самозанятых ([страница](https://yookassa.ru/platezhi-dlya-samozanyatyh/)), но **чеки в «Мой налог» нужно регистрировать самостоятельно** — «в ЮKassa эта опция недоступна» ([документация](https://yookassa.ru/developers/payment-acceptance/receipts/basics)). Значит, нужна своя интеграция с «Мой налог» или ручная регистрация. Есть сторонние open-source синхронизаторы, но им нужен пароль от личного кабинета налогоплательщика, и это риск. Доступны ли автоплатежи самозанятым — **не проверено**. Лимит дохода по НПД — **не перепроверял**.
-- Выбор формы — открытый вопрос (§16). Для старта с донатами и небольшой подпиской самозанятость проще; при росте — ИП с «Чеками от ЮKassa».
+- **Самозанятый (НПД):** ЮKassa подключает самозанятых ([страница](https://yookassa.ru/platezhi-dlya-samozanyatyh/)), но **чеки в «Мой налог» нужно регистрировать самостоятельно** — «в ЮKassa эта опция недоступна» ([документация](https://yookassa.ru/developers/payment-acceptance/receipts/basics)). Значит, нужна своя интеграция с «Мой налог» или ручная регистрация. Есть сторонние open-source синхронизаторы, но им нужен пароль от личного кабинета налогоплательщика, и это риск. (Автоплатежи сейчас не нужны, §12.2.) Лимит дохода по НПД — **не перепроверял**.
+- Выбор формы — открытый вопрос (§16). Для старта с донатами и разовыми оплатами Pro самозанятость проще; при росте — ИП с «Чеками от ЮKassa».
 
-**Сколько нужно, чтобы покрыть хостинг (грубая оценка):** при расходах ~3–5 тыс. ₽/мес на VPS, S3, бэкапы и мониторинг (цены **не проверялись**) и 199 ₽/мес за Pro за вычетом комиссий нужно примерно **20–30 платящих** или сопоставимый поток донатов.
+**Сколько нужно, чтобы покрыть хостинг (грубая оценка):** при расходах ~3–5 тыс. ₽/мес на VPS, S3, бэкапы и мониторинг (цены **не проверялись**) и 99 ₽ за 30 дней Pro нужно примерно **31–51 оплату Pro в месяц** до вычета комиссии ЮKassa (с комиссией — несколько больше) или сопоставимый поток донатов.
 
 ### 12.5 ToS Last.fm и порядок запуска
 
@@ -2043,7 +2030,7 @@ ToS API Last.fm разрешает **только некоммерческое �
 
 ### 12.6 Оплата в Telegram
 
-Цифровые товары внутри Telegram продаются только за Stars (`XTR`), ЮKassa как провайдер Telegram для них не подходит. На старте бот не продаёт: оплата и автоплатежи — на сайте, права общие. Stars — возможный дополнительный способ позже. Подробно — §13.6.
+Цифровые товары внутри Telegram продаются только за Stars (`XTR`), ЮKassa как провайдер Telegram для них не подходит. На старте бот не продаёт: оплата Pro и донаты — на сайте, права общие. Stars — возможный дополнительный способ позже. Подробно — §13.6.
 
 ---
 
@@ -2054,7 +2041,7 @@ ToS API Last.fm разрешает **только некоммерческое �
 
 - **Статистика по запросу:** now playing, топы, стрик, достижения, отчёты и сравнение с другом прямо в чате.
 - **Канал уведомлений:** «стрик под угрозой», новое достижение, «друг обогнал», проблемы с подключением, позже — недельный отчёт (Later, §13.4) (§9.8). Отправка — по настройкам пользователя.
-- **Поддержка и подписка:** статус Pro и объяснение, как поддержать проект на сайте; на старте бот ничего не продаёт — правила Telegram для цифровых товаров (§13.6).
+- **Поддержка и Pro:** статус Pro и объяснение, как поддержать проект на сайте; на старте бот ничего не продаёт — правила Telegram для цифровых товаров (§13.6).
 - **Бот не используется для входа.** Вход через Telegram попадает в зону риска по 149-ФЗ (R3). Бот только **привязывается** к уже существующему аккаунту Scrobb и не выдаёт сессий сайта.
 
 ### 13.2 Привязка аккаунта
@@ -2078,7 +2065,7 @@ ToS API Last.fm разрешает **только некоммерческое �
 | `/achievements` | Последние полученные и ближайшие по прогрессу | `user_achievements` |
 | `/compare @username` | Совместимость вкусов и общие артисты (§8.3); `@username` — **наш**, не Telegram-ник | Privacy guard (§13.9) |
 | `/report week\|month\|year` | Отчёт за прошлый период — карточкой-изображением | `listening_reports` |
-| `/pro` | Статус Pro, срок, управление (§13.6) | `subscriptions`, `entitlements` |
+| `/pro` | Статус Pro и дата окончания, как продлить на сайте (§13.6) | `entitlements` |
 | `/donate` | Как поддержать проект (§13.6) | — |
 | `/settings` | Какие уведомления присылать в Telegram, тихие часы, отвязка | `user_preferences.notifications` |
 | `/help`, `/paysupport` | Справка; вопросы по оплате (`/paysupport` требуется правилами Telegram для продажи за Stars, [FAQ](https://core.telegram.org/bots/payments-stars)) | — |
@@ -2103,14 +2090,14 @@ ToS API Last.fm разрешает **только некоммерческое �
 **Правила Telegram (сверено с [Bot Payments for Digital Goods](https://core.telegram.org/bots/payments-stars)):**
 - Цифровые товары и услуги в боте продаются **только за Telegram Stars** (валюта `XTR`). Сторонние платёжные провайдеры (`provider_token` — в том числе ЮKassa, которая есть среди провайдеров Telegram) — **только для физических товаров и услуг** ([Bot Payments API](https://core.telegram.org/bots/payments)). Pro и донаты — цифровые.
 - FAQ отдельно: даже при собственном сайте с платежами бот обязан использовать Stars для продажи цифровых товаров **внутри Telegram**. Иначе Telegram может не показывать бота мобильным пользователям (требования App Store и Google Play).
-- Подписки за Stars: `createInvoiceLink` с `subscription_period` — сейчас только **2592000** (30 дней), цена — до 10 000 Stars. Отмена и возобновление продления — `editUserStarSubscription`, возврат — `refundStarPayment`. В `SuccessfulPayment` приходят `subscription_expiration_date`, `is_recurring` и `is_first_recurring` ([Bot API](https://core.telegram.org/bots/api)).
+- Подписки за Stars: `createInvoiceLink` с `subscription_period` — сейчас только **2592000** (30 дней), цена — до 10 000 Stars. Нам автопродление не нужно (§12.2): для Pro подходит и обычный разовый счёт за Stars на 30 дней. Отмена и возобновление продления — `editUserStarSubscription`, возврат — `refundStarPayment`. В `SuccessfulPayment` приходят `subscription_expiration_date`, `is_recurring` и `is_first_recurring` ([Bot API](https://core.telegram.org/bots/api)).
 
 **Варианты:**
 1. **Ссылка на оплату ЮKassa из бота** (та же интеграция и вебхуки, что на сайте, §12.4). Технически проще всего, но для цифровых товаров **противоречит правилам Telegram**, а риск — потеря видимости бота для мобильных пользователей. Не рекомендуем.
-2. **Telegram Stars** (`XTR`) как отдельный способ оплаты в том же модуле `billing`: `payments.provider = 'telegram_stars'`, `telegram_payment_charge_id` в `payments`. `successful_payment` → те же `entitlements` (§12.4). Минусы: только месячный период; цена в Stars выше рублёвой из-за комиссий магазинов приложений; Stars выводятся как «reward» на условиях Telegram — как это работает для получателя из РФ и как учитывать такой доход в налогах (чеки 54-ФЗ / НПД), **не проверено**, это вопрос к юристу.
+2. **Telegram Stars** (`XTR`) как отдельный способ оплаты в том же модуле `billing`: `payments.provider = 'telegram_stars'`, `telegram_payment_charge_id` в `payments`. `successful_payment` → те же `entitlements` (§12.4). Минусы: цена в Stars выше рублёвой из-за комиссий магазинов приложений; Stars выводятся как «reward» на условиях Telegram — как это работает для получателя из РФ и как учитывать такой доход в налогах (чеки 54-ФЗ / НПД), **не проверено**, это вопрос к юристу.
 3. **Бот без продажи:** `/pro` и `/donate` показывают статус и объясняют, что поддержать проект можно на сайте. Кнопки оплаты и прямой платёжной ссылки в боте нет. Риск минимальный, но ссылку на сайт с ценами Telegram тоже может посчитать обходом правил — граница **не проверена**.
 
-**Рекомендация:** на старте — **вариант 3** (бот не продаёт; оплата, автоплатежи и чеки — только на сайте через ЮKassa, §12). Подписка, оформленная на сайте, работает и в боте: права общие. **Stars (вариант 2)** добавляем позже как дополнительный способ, если спрос на оплату внутри Telegram подтвердится и вопрос с выводом и налогами будет решён. Такая подписка — ещё один `source` в `entitlements`. Вариант 1 не используем.
+**Рекомендация:** на старте — **вариант 3** (бот не продаёт; оплата и чеки — только на сайте через ЮKassa, §12). Pro, оплаченный на сайте, работает и в боте: права общие. **Stars (вариант 2)** добавляем позже как дополнительный способ, если спрос на оплату внутри Telegram подтвердится и вопрос с выводом и налогами будет решён. Такая оплата — ещё один `source` в `entitlements` (те же 30 дней со сложением, §12.4). Вариант 1 не используем.
 
 ### 13.7 Архитектура
 
@@ -2221,11 +2208,11 @@ CREATE TABLE notification_deliveries (
 20. Выбор хостинга и тарифа в РФ (VPS или сразу managed PostgreSQL); после первых ~100 пользователей проверить оценки §7.3 через `pg_total_relation_size` и пороги §7.4.
 
 **Монетизация**
-21. **Цены Pro** утверждены — 199 ₽/мес и 1 990 ₽/год (§12.2). Открыто: после запуска Pro оценить конверсию и отклик первых пользователей.
-22. **Пробный период** Pro: нужен ли (7/14 дней) и требует ли он привязки карты.
+21. **Цена Pro** утверждена — 99 ₽ за 30 дней разовым платежом, без автопродления и без годового тарифа (§12.2). Открыто: после запуска оценить конверсию; нужны ли позже годовой тариф или автопродление (Later, §12.4).
+22. **Пробный период** Pro: нужен ли (7/14 дней); привязки карты он не требует — автоплатежей нет.
 23. **Как показывать Pro-функции бесплатным пользователям** без агрессивного апселла: тихая пометка «Pro» в настройках, без баннеров и заблокированных виджетов на профиле.
-24. **Юридическая форма** для приёма платежей: самозанятый (чеки вручную в «Мой налог», доступность автоплатежей не проверена) или ИП/ООО с «Чеками от ЮKassa» (§12.4).
-25. Требования закона к **автопродлению** подписок (уведомления, отказ, оферта) и политика возвратов — к юристу (не проверено).
+24. **Юридическая форма** для приёма платежей: самозанятый (чеки вручную в «Мой налог») или ИП/ООО с «Чеками от ЮKassa» (§12.4).
+25. **Оферта и политика возвратов** за неиспользованные дни Pro — к юристу (не проверено). Требования закона к автопродлению станут актуальны, только если оно появится (Later).
 26. Донаты: свои платежи через ЮKassa сразу или сначала внешняя площадка (Boosty, CloudTips) (§12.3).
 27. Граница «Pro только на собственных данных» до согласия Last.fm: как считать Pro-статистику у пользователей с большим импортом (§12.5).
 
