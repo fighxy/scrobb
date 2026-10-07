@@ -1,6 +1,6 @@
 # CI/CD для Scrobb: экономный режим на GitHub Free
 
-> Статус: **черновик** (04.10.2026). **Решение Ивана:** репозиторий приватный, план GitHub Free. CI запускается редко — только для крупных проверок — и укладывается в бесплатные 2 000 минут GitHub-hosted раннеров. Отдельного VPS под раннер пока нет. Стек и деплой — из [architecture.md](architecture.md) (§6, §7): Python 3.12 + FastAPI, очередь за интерфейсом `jobs`, PostgreSQL 16, Valkey (два экземпляра), Next.js, Telegram-бот (aiogram), Docker Compose на одном VPS в РФ (152-ФЗ). Пометка **(не проверено)** — факт не подтверждён первоисточником или на практике; **(оценка)** — расчёт, а не измерение. Источники — в конце, номера в тексте вида [N]. Цифры GitHub сверены с docs.github.com 04.10.2026.
+> Статус: **черновик** (04.10.2026; стек обновлён 07.10.2026 по [ревью](review.md), §2). **Решение Ивана:** репозиторий приватный, план GitHub Free. CI запускается редко — только для крупных проверок — и укладывается в бесплатные 2 000 минут GitHub-hosted раннеров. Отдельного VPS под раннер пока нет. Стек и деплой — из [architecture.md](architecture.md) (§6, §7): Python 3.14 + FastAPI, очередь procrastinate в PostgreSQL за интерфейсом `jobs`, PostgreSQL 18, Valkey 9 (один экземпляр — кэш), Next.js, Telegram-бот (aiogram), Docker Compose на одном VPS в РФ (152-ФЗ). Пометка **(не проверено)** — факт не подтверждён первоисточником или на практике; **(оценка)** — расчёт, а не измерение. Источники — в конце, номера в тексте вида [N]. Цифры GitHub сверены с docs.github.com 04.10.2026.
 
 ## Коротко
 
@@ -94,7 +94,7 @@
            files: ^web/.*\.(ts|tsx|js|jsx)$
    ```
 
-   Установка: `pre-commit install && pre-commit install --hook-type pre-push`. Дополнительно — `make check`, который повторяет CI локально: поднимает `postgres:16` и два Valkey через `docker compose -f compose.test.yaml`, затем запускает `pytest`, `alembic upgrade head && alembic check` и `pnpm build`. Правило: PR открываем (или переводим из draft) **после** зелёного `make check`. Хук-идентификаторы `ruff-check` и `gitleaks` сверить с README репозиториев при внедрении (**не проверено**).
+   Установка: `pre-commit install && pre-commit install --hook-type pre-push`. Дополнительно — `make check`, который повторяет CI локально: поднимает `postgres:18` и Valkey через `docker compose -f compose.test.yaml`, затем запускает `pytest`, `alembic upgrade head && alembic check` и `pnpm build`. Правило: PR открываем (или переводим из draft) **после** зелёного `make check`. Хук-идентификаторы `ruff-check` и `gitleaks` сверить с README репозиториев при внедрении (**не проверено**).
 2. **Draft PR не тратят минуты:** у джобы условие `if: github.event.pull_request.draft == false` (для `pull_request`). Работаем в draft, переводим в «Ready for review», когда готово. Push в готовый PR — новый прогон, поэтому коммиты в готовый PR лучше пушить пачкой.
 3. **Только документация — CI не запускается:** `paths-ignore: ['docs/**', '**/*.md', 'LICENSE', '.github/ISSUE_TEMPLATE/**']`. На приватном Free обязательных проверок нет, поэтому пропущенный workflow ничего не блокирует. С появлением required checks (Pro или публичный репозиторий) пропущенный workflow оставит проверку в Pending [19] — тогда перейдём на `ci-gate`.
 4. **Внутри джобы — фильтр по частям:** шаг `dorny/paths-filter` определяет, менялись ли `backend/**` или `web/**`, и шаги другой части пропускаются (`if: steps.f.outputs.web == 'true'`).
@@ -156,21 +156,17 @@ jobs:
     timeout-minutes: 15
     services:
       postgres:
-        image: postgres:16
+        image: postgres:18          # pg_partman не нужен: секции создаёт своя задача (architecture.md §2.3)
         env: { POSTGRES_PASSWORD: test, POSTGRES_DB: scrobb_test }
         ports: ['5432:5432']
         options: >-
           --health-cmd "pg_isready -U postgres" --health-interval 5s --health-retries 20
-      valkey-queue:
-        image: valkey/valkey:8          # та же версия, что в prod compose
+      valkey:
+        image: valkey/valkey:9          # та же версия, что в prod compose
         ports: ['6379:6379']
-      valkey-cache:
-        image: valkey/valkey:8
-        ports: ['6380:6379']
     env:
-      DATABASE_URL: postgresql+asyncpg://postgres:test@localhost:5432/scrobb_test
-      VALKEY_QUEUE_URL: redis://localhost:6379/0
-      VALKEY_CACHE_URL: redis://localhost:6380/0
+      DATABASE_URL: postgresql+psycopg://postgres:test@localhost:5432/scrobb_test   # psycopg 3 — общий драйвер с procrastinate
+      VALKEY_URL: redis://localhost:6379/0
     steps:
       - uses: actions/checkout@<SHA>
       - id: f
@@ -229,7 +225,7 @@ flowchart TD
 
   subgraph CI["ci.yml: pull_request в main, workflow_dispatch (cancel-in-progress)"]
     direction TB
-    CHECK["одна джоба check: paths-filter, Postgres 16 и 2 Valkey, кэш uv и pnpm"]
+    CHECK["одна джоба check: paths-filter, Postgres 18 и Valkey, кэш uv и pnpm"]
     CHECK --> BE["backend: ruff, mypy, pytest, alembic upgrade и check"]
     CHECK --> FE["web: eslint, tsc, next build"]
   end
@@ -269,11 +265,12 @@ flowchart TD
 
 ### 6.2 Образы и реестр
 
-- Два образа: `scrobb-backend` (один образ, роль задаётся `ROLE=api|worker|scheduler|bot|migrate`, architecture.md §7.6) и `scrobb-web`. Теги: неизменяемый `sha-<7 символов>` и релизный `vX.Y.Z`. `latest` в prod не используем.
+- Два образа: `scrobb-backend` (один образ, роль задаётся `ROLE=api|worker|bot|migrate`, architecture.md §7.6) и `scrobb-web`. Теги: неизменяемый `sha-<7 символов>` и релизный `vX.Y.Z`. `latest` в prod не используем.
 - **GHCR — основной реестр:** push из Actions через `GITHUB_TOKEN`. Для pull на VPS нужен **classic PAT** с `read:packages` — fine-grained токены GitHub Packages не поддерживает [18]. Classic PAT видит все пакеты аккаунта, поэтому лучше отдельный machine-user.
 - **Если pull из GHCR на VPS в РФ сбоит** [13][14]: ретраи в `deploy.sh`; компактные образы (multi-stage, slim-база); запасной вариант без реестра — `docker save | ssh vps docker load` или свой реестр (CNCF Distribution / Zot) на VPS.
 - **Откат не зависит от реестра:** на VPS храним локально 3–5 предыдущих тегов, чистим только более старые.
 - Docker Hub с VPS: `docker login` и/или `registry-mirrors` (например, зеркало GitVerse `dh-mirror.gitverse.ru` [25]) — из-за лимитов pull [21].
+- **Том PostgreSQL 18 в compose** монтируем в `/var/lib/postgresql`, а не в `/var/lib/postgresql/data`, как до 18-й версии: в образе `postgres:18` `PGDATA` = `/var/lib/postgresql/18/docker`, а `VOLUME` перенесён на уровень выше [38].
 
 ### 6.3 SSH с forced command
 
@@ -310,8 +307,8 @@ else
 fi
 ```
 
-- `docker compose up --wait` ждёт, пока сервисы станут `running` или `healthy` [33]. У каждого сервиса есть `healthcheck`: `api` — `GET /healthz`, `web` — свой health-роут, `worker`/`scheduler`/`bot` — heartbeat-ключ в Valkey или файл с меткой времени.
-- `smoke.sh` проверяет снаружи через Caddy: `/readyz` (БД и оба Valkey отвечают, ревизия Alembic = head), главную страницу, тестовый скроббл (только на staging).
+- `docker compose up --wait` ждёт, пока сервисы станут `running` или `healthy` [33]. У каждого сервиса есть `healthcheck`: `api` — `GET /healthz`, `web` — свой health-роут, `worker`/`bot` — heartbeat-ключ в Valkey или файл с меткой времени (отдельного `scheduler` нет: периодические задачи ставят воркеры, architecture.md §6.3).
+- `smoke.sh` проверяет снаружи через Caddy: `/readyz` (БД и Valkey отвечают, ревизия Alembic = head), главную страницу, тестовый скроббл (только на staging).
 - Простой при `up -d` на одном VPS — секунды (**не измерено**). Blue/green за Caddy — позже, если понадобится.
 - Откат образа не откатывает БД — поэтому миграции по схеме expand/contract (§6.6).
 
@@ -330,13 +327,13 @@ fi
 1. Отдельный шаг деплоя, одноразовый контейнер `migrate` из **нового** образа до `up` (architecture.md §7.6).
 2. **Expand → migrate → contract:** миграция совместима с предыдущей версией кода, удаление старого — в следующем релизе. Тогда откат образа безопасен без `downgrade`.
 3. `downgrade` в prod автоматически не запускаем. Восстановление — из бэкапа перед миграцией или PITR.
-4. В `env.py`: `SET lock_timeout = '5s'` и `statement_timeout`. Индексы на больших таблицах — `CREATE INDEX CONCURRENTLY` в `autocommit_block()`. Секции `listens` создаёт `pg_partman`, а не Alembic.
+4. В `env.py`: `SET lock_timeout = '5s'` и `statement_timeout`. Индексы на больших таблицах — `CREATE INDEX CONCURRENTLY` в `autocommit_block()`. Секции `listens` создаёт периодическая задача `partitions.ensure` (architecture.md §2.3), а не Alembic; начальный набор секций — в миграции. Таблицы очереди — SQL-миграции procrastinate, которые применяются тем же шагом `migrate`.
 5. Бэкфилл данных — фоновая задача в очереди, а не миграция.
 6. В CI (`check`): `alembic upgrade head` на пустой БД и `alembic check`. Локально в `make check` — то же.
 
 ### 6.7 Окружения staging и prod
 
-- **staging:** на том же VPS отдельный compose-проект `scrobb-staging` со своими Postgres и двумя Valkey, `mem_limit`/`cpus`, поддомен за basic auth, только синтетические данные. Деплоится на каждый тег `v*`, в том числе `vX.Y.Z-rc.N`. Если ресурсов VPS мало — поднимаем только на время проверки релиза.
+- **staging:** на том же VPS отдельный compose-проект `scrobb-staging` со своими Postgres и Valkey, `mem_limit`/`cpus`, поддомен за basic auth, только синтетические данные. Деплоится на каждый тег `v*`, в том числе `vX.Y.Z-rc.N`. Если ресурсов VPS мало — поднимаем только на время проверки релиза.
 - **prod:** только финальный тег `vX.Y.Z`, только вручную (`deploy-prod.yml`), с бэкапом перед миграцией.
 - Штатных environments на приватном Free нет [7] — разделение через отдельные workflow, разные SSH-ключи и проверки в `deploy.sh`.
 
@@ -437,4 +434,5 @@ GitHub — тарифы и лимиты:
 - [35] pre-commit: https://pre-commit.com/ ; ruff-pre-commit: https://github.com/astral-sh/ruff-pre-commit
 - [36] SourceCraft — Правила тарификации (с 01.10.2026): https://sourcecraft.dev/portal/docs/ru/sourcecraft/pricing
 - [37] Forgejo — Actions user guide: https://forgejo.org/docs/latest/user/actions/overview/
+- [38] Docker Hub — образ `postgres` (PGDATA и VOLUME в 18+): https://hub.docker.com/_/postgres
 - Внутренние документы: [architecture.md](architecture.md) (§6, §7), [stack-rationale.md](stack-rationale.md)
