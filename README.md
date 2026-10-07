@@ -101,6 +101,7 @@ flowchart LR
 
 - [docs/architecture.md](docs/architecture.md) — архитектура этапа 1: модель данных, приём скробблов, импорт Last.fm, инфраструктура, механики, экраны, дизайн-система, монетизация, Telegram-бот, email, свои клиенты-скробблеры, открытые вопросы.
 - [docs/backend-core.md](docs/backend-core.md) — карта ядра бэкенда: путь скроббла, цепочка событий, чтение, модули и их таблицы.
+- [docs/frontend-core.md](docs/frontend-core.md) — карта ядра фронтенда: как страница получает данные, профиль, маршруты, структура Next.js-приложения, дизайн-токены.
 - [docs/stack-rationale.md](docs/stack-rationale.md) — обоснование стека и сравнение с альтернативами и со стеком Last.fm.
 - [docs/music-services-ru.md](docs/music-services-ru.md) — музыкальные сервисы в РФ и способы получить историю прослушиваний.
 - [docs/ci-cd.md](docs/ci-cd.md) — CI/CD в экономном режиме на бесплатных минутах GitHub Free, деплой и откат.
