@@ -1,0 +1,37 @@
+[workspace]
+resolver = "3"
+members = ["crates/*", "bindings/*"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.85"
+publish = false
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Ярус Scrobb: не зависит от плеера, собирается под wasm32 (README, «Ярусы»).
+scrobb-api = { path = "crates/scrobb-api" }
+scrobb-rules = { path = "crates/scrobb-rules" }
+scrobb-client = { path = "crates/scrobb-client" }
+scrobb-sync = { path = "crates/scrobb-sync" }
+
+# Ярус плеера.
+player-domain = { path = "crates/player-domain" }
+player-ports = { path = "crates/player-ports" }
+player-playback = { path = "crates/player-playback" }
+player-engine = { path = "crates/player-engine" }
+player-library = { path = "crates/player-library" }
+player-history = { path = "crates/player-history" }
+player-metadata = { path = "crates/player-metadata" }
+player-plugins = { path = "crates/player-plugins" }
+player-core = { path = "crates/player-core" }
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }

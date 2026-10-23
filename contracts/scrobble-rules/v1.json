@@ -1,0 +1,87 @@
+{
+  "version": 1,
+  "description": "Правило скроббла Scrobb (docs/architecture.md §18.7, проверка на сервере — §11.1, шаг 6). Время — в миллисекундах. Сессия: события применяются по порядку, после каждого вызывается проверка порога; scrobbles — все сработавшие скробблы.",
+  "thresholds": { "min_track_ms": 30000, "percent": 50, "max_wait_ms": 240000 },
+  "required_play_ms": [
+    { "name": "трек короче 30 с не скробблится", "duration_ms": 25000, "expected": null },
+    { "name": "ровно 30 с не скробблится: нужно строго длиннее", "duration_ms": 30000, "expected": null },
+    { "name": "31 с — половина длительности", "duration_ms": 31000, "expected": 15500 },
+    { "name": "3 мин — половина длительности", "duration_ms": 180000, "expected": 90000 },
+    { "name": "8 мин — ровно 4 мин", "duration_ms": 480000, "expected": 240000 },
+    { "name": "10 мин — не больше 4 мин", "duration_ms": 600000, "expected": 240000 },
+    { "name": "длительность неизвестна — 4 мин", "duration_ms": null, "expected": 240000 }
+  ],
+  "sessions": [
+    {
+      "name": "прослушали половину без пауз",
+      "duration_ms": 180000,
+      "events": [
+        { "at_ms": 0, "type": "start" },
+        { "at_ms": 89999, "type": "tick" },
+        { "at_ms": 90000, "type": "tick" }
+      ],
+      "scrobbles": [{ "at_ms": 90000, "played_ms": 90000 }]
+    },
+    {
+      "name": "пауза останавливает счётчик",
+      "duration_ms": 180000,
+      "events": [
+        { "at_ms": 0, "type": "start" },
+        { "at_ms": 60000, "type": "pause" },
+        { "at_ms": 600000, "type": "resume" },
+        { "at_ms": 620000, "type": "tick" },
+        { "at_ms": 630000, "type": "tick" }
+      ],
+      "scrobbles": [{ "at_ms": 630000, "played_ms": 90000 }]
+    },
+    {
+      "name": "перемотка вперёд не засчитывается",
+      "duration_ms": 180000,
+      "events": [
+        { "at_ms": 0, "type": "start" },
+        { "at_ms": 10000, "type": "seek" },
+        { "at_ms": 20000, "type": "stop" }
+      ],
+      "scrobbles": []
+    },
+    {
+      "name": "короткий трек не скробблится даже целиком",
+      "duration_ms": 20000,
+      "events": [
+        { "at_ms": 0, "type": "start" },
+        { "at_ms": 20000, "type": "stop" }
+      ],
+      "scrobbles": []
+    },
+    {
+      "name": "длительность неизвестна — после 4 минут звучания",
+      "duration_ms": null,
+      "events": [
+        { "at_ms": 0, "type": "start" },
+        { "at_ms": 239999, "type": "tick" },
+        { "at_ms": 240000, "type": "tick" }
+      ],
+      "scrobbles": [{ "at_ms": 240000, "played_ms": 240000 }]
+    },
+    {
+      "name": "один трек скробблится один раз",
+      "duration_ms": 180000,
+      "events": [
+        { "at_ms": 0, "type": "start" },
+        { "at_ms": 90000, "type": "tick" },
+        { "at_ms": 180000, "type": "stop" }
+      ],
+      "scrobbles": [{ "at_ms": 90000, "played_ms": 90000 }]
+    },
+    {
+      "name": "после остановки время не идёт",
+      "duration_ms": 180000,
+      "events": [
+        { "at_ms": 0, "type": "start" },
+        { "at_ms": 50000, "type": "stop" },
+        { "at_ms": 500000, "type": "tick" }
+      ],
+      "scrobbles": []
+    }
+  ]
+}

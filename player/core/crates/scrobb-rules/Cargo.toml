@@ -1,0 +1,17 @@
+[package]
+name = "scrobb-rules"
+description = "Правило скроббла и политика «сейчас играет» — общие для всех клиентов Scrobb"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+scrobb-api.workspace = true
+
+[dev-dependencies]
+serde.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

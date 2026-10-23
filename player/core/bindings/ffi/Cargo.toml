@@ -1,0 +1,17 @@
+[package]
+name = "player-ffi"
+description = "Привязки ядра к Swift и Kotlin для нативных оболочек (UniFFI, заготовка)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lib]
+# Для XCFramework (Apple) и .so (Android, JVM-десктоп) добавятся "staticlib" и "cdylib".
+crate-type = ["lib"]
+
+[dependencies]
+player-core.workspace = true
+
+[lints]
+workspace = true

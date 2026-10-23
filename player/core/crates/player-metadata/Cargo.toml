@@ -1,0 +1,13 @@
+[package]
+name = "player-metadata"
+description = "Метаданные: MusicBrainz, AcoustID, обложки, тексты, исправление кодировок (заготовка)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+player-domain.workspace = true
+
+[lints]
+workspace = true

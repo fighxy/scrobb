@@ -1,0 +1,13 @@
+[package]
+name = "scrobb-sync"
+description = "Синхронизация рейтингов и плейлистов через аккаунт Scrobb (заготовка)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde.workspace = true
+
+[lints]
+workspace = true

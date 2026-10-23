@@ -164,16 +164,24 @@ flowchart TB
 
 ## 7. Репозиторий, сборка, тесты
 
+Каркас ядра уже лежит в репозитории: [`player/core`](../player/core/README.md) (структура, ярусы, правила зависимостей, проверки). Общие контракты Scrobb — в [`contracts/`](../contracts/README.md).
+
 ```
+contracts/               # тест-векторы, общие для бэкенда, веба, расширения и Rust
 player/
-  core/                  # Rust workspace
+  core/                  # Rust workspace — есть каркас
     crates/
-      engine/  playback/  library/  history/  scrobble/
-      sync/  metadata/  plugins/  ffi/
-  shells/
+      scrobb-api/  scrobb-rules/  scrobb-client/  scrobb-sync/     # ярус Scrobb (wasm32)
+      player-domain/  player-playback/  player-history/            # общий ярус плеера (wasm32)
+      player-ports/  player-engine/  player-library/
+      player-metadata/  player-plugins/  player-core/              # нативный ярус плеера
+    bindings/
+      ffi/                # UniFFI → Swift, Kotlin
+      wasm/               # wasm-bindgen → веб-приложение Scrobb и расширение
+  shells/                 # позже
     apple/               # Xcode: iOS, iPadOS, macOS (SwiftUI), CarPlay; ядро — XCFramework
     compose/             # Gradle: androidApp, desktopApp (Windows, Linux), общий UI
-  tools/                 # генерация привязок, дизайн-токены
+  tools/                 # позже: генерация привязок, дизайн-токены
 ```
 
 - **Цели сборки ядра:** `aarch64-linux-android` и `x86_64-linux-android` (через `cargo-ndk`); `aarch64-apple-ios`, `aarch64-apple-ios-sim`, `aarch64-apple-darwin`, `x86_64-apple-darwin` (собираются в XCFramework); `x86_64-` и `aarch64-pc-windows-msvc`; `x86_64-` и `aarch64-unknown-linux-gnu`.
@@ -188,9 +196,12 @@ player/
 
 ## 8. Связь со Scrobb
 
-- **Правила скроббла и очередь** ([architecture.md](architecture.md) §18.7–§18.8) в плеере реализуются на Rust. Сейчас `scrobbler-core` запланирован на TypeScript (§18.12). Если плеер появится, разумно вынести правила в Rust-крейт и использовать его и в плеере, и в десктоп-клиенте на Tauri; расширению браузера останется TS-версия, сверяемая общими тестовыми векторами.
-- **Клиент родного API** генерируется из OpenAPI бэкенда, как для веба и расширения.
-- **Синхронизация рейтингов и плейлистов** требует новых эндпоинтов и модели данных на сервере — вне этапа 1.
+В каркасе код, общий со Scrobb, выделен в отдельный **ярус Scrobb** (`scrobb-*`). Он не зависит от плеера и собирается под WebAssembly, поэтому его могут использовать плеер, десктоп-клиент на Tauri и — через `bindings/wasm` — веб-приложение и расширение.
+
+- **Правило скроббла** ([architecture.md](architecture.md) §18.7) — крейт `scrobb-rules`, сверяется с языконезависимыми векторами [`contracts/scrobble-rules/v1.json`](../contracts/scrobble-rules/v1.json). Те же векторы должны проходить бэкенд (повторная проверка, §11.1, шаг 6) и TypeScript-код. Сейчас `scrobbler-core` запланирован на TypeScript (§18.12); каркас показывает альтернативу — одна реализация на Rust, в веб она попадает через wasm. Решение — вместе с выбором стека десктоп-клиента (§16, п. 42).
+- **Протокол** ([architecture.md](architecture.md) §18.3–§18.4) — DTO в `scrobb-api`, клиент в стиле sans-IO в `scrobb-client`: он строит запросы и разбирает ответы, а сеть даёт вызывающий код. Поэтому один код протокола работает в плеере, в Tauri-клиенте и в браузере. Задержки повторов (§18.8) — там же. Позже DTO генерируются из OpenAPI бэкенда.
+- **Синхронизация рейтингов и плейлистов** — `scrobb-sync`: ключ трека, общий с сервером, и правки «последняя запись побеждает» на гибридных логических часах. Требует новых эндпоинтов, модели данных на сервере и общего с бэкендом `match_key` (§5.3) — вне этапа 1. Те же данные показывает и правит веб-приложение.
+- **Изменения на бэкенде, когда плеер появится:** новое значение `player` в `source.kind` и `client_kind` (сейчас только `extension` и `desktop`).
 
 ## 9. Порядок работ (если когда-нибудь)
 

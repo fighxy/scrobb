@@ -1,0 +1,20 @@
+[package]
+name = "scrobb-wasm"
+description = "Ярус Scrobb для веб-приложения и расширения через WebAssembly (wasm-bindgen, заготовка)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lib]
+# Для npm-пакета добавится "cdylib" и зависимость wasm-bindgen.
+crate-type = ["lib"]
+
+[dependencies]
+scrobb-api.workspace = true
+scrobb-rules.workspace = true
+scrobb-client.workspace = true
+scrobb-sync.workspace = true
+
+[lints]
+workspace = true
