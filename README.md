@@ -101,7 +101,7 @@ flowchart LR
 - [docs/architecture.md](docs/architecture.md) — архитектура этапа 1: модель данных, приём скробблов, импорт Last.fm, инфраструктура, механики, экраны, дизайн-система, монетизация, Telegram-бот, email, свои клиенты-скробблеры, открытые вопросы.
 - [docs/stack-rationale.md](docs/stack-rationale.md) — обоснование стека и сравнение с альтернативами и со стеком Last.fm.
 - [docs/music-services-ru.md](docs/music-services-ru.md) — музыкальные сервисы в РФ и способы получить историю прослушиваний.
-- [docs/local-players-research.md](docs/local-players-research.md) — локальные кроссплатформенные плееры: функции, сильные и слабые стороны, что можно добавить и стоит ли писать свой плеер.
+- [docs/local-players-research.md](docs/local-players-research.md) — локальные плееры для десктопа, Android и iOS: функции, сильные и слабые стороны, скробблинг с телефона, что можно добавить и стоит ли писать свой плеер.
 
 ## Участие
 
