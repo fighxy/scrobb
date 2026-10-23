@@ -102,6 +102,7 @@ flowchart LR
 - [docs/stack-rationale.md](docs/stack-rationale.md) — обоснование стека и сравнение с альтернативами и со стеком Last.fm.
 - [docs/music-services-ru.md](docs/music-services-ru.md) — музыкальные сервисы в РФ и способы получить историю прослушиваний.
 - [docs/local-players-research.md](docs/local-players-research.md) — локальные плееры для десктопа, Android и iOS: функции, сильные и слабые стороны, скробблинг с телефона, что можно добавить и стоит ли писать свой плеер.
+- [docs/player-architecture.md](docs/player-architecture.md) — эскиз: на каком стеке и с какой архитектурой можно было бы написать свой плеер для Android, iOS, macOS, Windows и Linux (одно ядро на Rust, нативные оболочки).
 
 ## Участие
 
