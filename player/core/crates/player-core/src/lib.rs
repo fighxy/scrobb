@@ -4,13 +4,14 @@
 //! состояние и сообщает [`Event`] наблюдателю. Модули связываются здесь:
 //! очередь (`player-playback`) решает, что играть, библиотека
 //! (`player-library`) превращает идентификатор в файл, движок
-//! (`player-engine`) играет и сообщает, что реально звучит.
+//! (`player-engine`) играет и сообщает, что реально звучит, история
+//! (`player-history`) запоминает прослушивания и отправляет засчитанные.
 //!
-//! События движка обрабатывает отдельный поток. Наблюдатель и медиасессия
-//! вызываются без удержания блокировок, поэтому из колбэка можно сразу
-//! отправить новую команду.
+//! События движка обрабатывает отдельный поток, историю и сеть — ещё один.
+//! Наблюдатель и медиасессия вызываются без удержания блокировок, поэтому
+//! из колбэка можно сразу отправить новую команду.
 //!
-//! Пока не подключены: история и скробблинг, сеть, привязка аккаунта Scrobb.
+//! Пока не подключены: привязка аккаунта Scrobb и «сейчас играет».
 
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
@@ -18,9 +19,18 @@ use std::thread::{self, JoinHandle};
 
 use player_domain::{PlaybackStatus, PlayerState, RepeatMode, Track, TrackId};
 use player_engine::{Engine, EngineConfig, EngineEvent, EngineMessage, EngineTrack};
+use player_history::{HistoryStore, Outcome, PlayRecord};
 use player_library::TrackStore;
 use player_playback::Queue;
 use player_ports::{AudioOutput, Clock, FileAccess, HttpTransport, MediaSession, SecureStore};
+use scrobb_api::{ClientKind, Thresholds};
+use scrobb_client::{ClientInfo, ScrobbClient};
+
+mod history;
+
+use history::{Delivery, HistoryService, Report, Stamp};
+
+pub use history::SCROBB_TOKEN_KEY;
 
 /// «Назад» в первые 3 секунды трека — предыдущий трек, позже — начало текущего.
 pub const RESTART_THRESHOLD_MS: u64 = 3_000;
@@ -45,11 +55,35 @@ pub struct Ports {
     pub media_session: Option<Arc<dyn MediaSession>>,
 }
 
+/// Хранилища, которые оболочка открывает и передаёт ядру.
+pub struct Stores {
+    /// Библиотека: трек по идентификатору.
+    pub library: Arc<dyn TrackStore>,
+    /// История прослушиваний (`player-store-sqlite`); без неё ничего не запоминается
+    /// и не скробблится.
+    pub history: Option<Arc<dyn HistoryStore>>,
+}
+
 /// Настройки ядра.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct CoreConfig {
     /// Звуковой движок.
     pub engine: EngineConfig,
+    /// Пороги скроббла; позже приходят из `GET /api/v1/scrobble/config`.
+    pub thresholds: Thresholds,
+    /// Куда отправлять скробблы; `None` — только локальная история.
+    pub scrobb: Option<ScrobbSettings>,
+}
+
+/// Сервер Scrobb и то, как плеер себя называет (`User-Agent`, §18.3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScrobbSettings {
+    /// Адрес API, например `https://scrobb.ru`.
+    pub base_url: String,
+    /// Версия плеера.
+    pub version: String,
+    /// Платформа: `android`, `ios`, `windows`, `macos`, `linux`.
+    pub platform: String,
 }
 
 /// Команда от оболочки: кнопки, медиаклавиши, экран блокировки, автомобиль.
@@ -72,7 +106,7 @@ pub enum Command {
     Next,
     /// В первые [`RESTART_THRESHOLD_MS`] — предыдущий трек, позже — начало текущего.
     Previous,
-    /// Перемотка.
+    /// Перемотка; в самое начало — новое прослушивание того же трека (§18.7).
     Seek {
         /// Позиция.
         position_ms: u64,
@@ -100,8 +134,34 @@ pub enum Event {
         /// Адрес страницы с подставленным кодом.
         verification_uri_complete: String,
     },
+    /// Отправка в Scrobb: «в очереди N», «войдите заново» (§18.2).
+    Scrobbling(ScrobbleStatus),
     /// Ошибка, которую стоит показать пользователю.
     Error(String),
+}
+
+/// Состояние отправки в Scrobb.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScrobbleStatus {
+    /// Сколько засчитанных прослушиваний ждёт отправки.
+    pub pending: usize,
+    /// Что с отправкой.
+    pub state: ScrobbleState,
+}
+
+/// Что с отправкой в Scrobb.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScrobbleState {
+    /// Устройство не привязано: история пишется, в очередь ничего не ставится.
+    NotLinked,
+    /// Всё отправляется.
+    Ready,
+    /// Сеть или сервер недоступны — повтор позже (§18.8).
+    Retrying,
+    /// Токен отозван: нужно войти заново; очередь сохранена.
+    Unauthorized,
+    /// Версия плеера устарела: нужно обновиться; очередь сохранена.
+    UpgradeRequired,
 }
 
 /// Получатель событий: реализуется оболочкой через callback-интерфейс привязок.
@@ -126,36 +186,72 @@ pub struct Capabilities {
 pub enum CoreError {
     /// Команда ещё не реализована в заготовке.
     NotImplemented(&'static str),
-    /// Нет нужного адаптера.
+    /// Нет нужного адаптера или хранилища.
     MissingPort(&'static str),
     /// Пустая очередь или начальная позиция за её пределами.
     InvalidQueue,
+    /// Ошибка хранилища истории.
+    History(String),
 }
 
 /// Ядро плеера.
 pub struct Core {
-    /// `Option` — только чтобы в `drop` отпустить ядро раньше, чем ждать поток событий.
+    /// `Option` — только чтобы в `drop` отпустить ядро раньше, чем ждать потоки.
     inner: Option<Arc<Inner>>,
     events: Option<JoinHandle<()>>,
+    history: Option<JoinHandle<()>>,
 }
 
 impl Core {
     /// Создать ядро и запустить движок.
     pub fn new(
         ports: Ports,
-        library: Arc<dyn TrackStore>,
+        stores: Stores,
         config: CoreConfig,
         observer: Arc<dyn Observer>,
     ) -> Self {
+        let scrobbling = ports.http.is_some() && ports.secrets.is_some() && config.scrobb.is_some();
+        let delivery = match (&config.scrobb, &ports.http, &ports.secrets) {
+            (Some(scrobb), Some(http), Some(secrets)) => Some(Delivery {
+                client: ScrobbClient::new(
+                    scrobb.base_url.clone(),
+                    ClientInfo {
+                        kind: ClientKind::Player,
+                        version: scrobb.version.clone(),
+                        platform: scrobb.platform.clone(),
+                    },
+                ),
+                http: http.clone(),
+                secrets: secrets.clone(),
+            }),
+            _ => None,
+        };
+        let (reports, history) = match &stores.history {
+            Some(store) => {
+                let (tx, rx) = mpsc::channel();
+                let service = HistoryService::new(
+                    store.clone(),
+                    ports.clock.clone(),
+                    observer.clone(),
+                    config.thresholds,
+                    delivery,
+                );
+                (Some(tx), Some(service.spawn(rx)))
+            }
+            None => (None, None),
+        };
         let (tx, rx) = mpsc::channel();
         let engine = Engine::new(ports.audio, ports.files, config.engine, tx);
         let inner = Arc::new(Inner {
             engine,
-            library,
+            library: stores.library,
+            history: stores.history,
+            reports,
+            clock: ports.clock,
             observer,
             media_session: ports.media_session,
             http: ports.http,
-            secrets: ports.secrets,
+            scrobbling,
             session: Mutex::new(Session {
                 state: PlayerState {
                     volume: 1.0,
@@ -186,6 +282,7 @@ impl Core {
         Self {
             inner: Some(inner),
             events: Some(events),
+            history,
         }
     }
 
@@ -202,12 +299,28 @@ impl Core {
 
     /// Возможности платформы.
     pub fn capabilities(&self) -> Capabilities {
-        let inner = self.inner();
         Capabilities {
             bit_perfect: false,
             install_plugins: !cfg!(target_os = "ios"),
-            scrobbling: inner.http.is_some() && inner.secrets.is_some(),
+            scrobbling: self.inner().scrobbling,
         }
+    }
+
+    /// Лента истории: новые первыми, начатые строго раньше `before_ms`
+    /// (для следующей страницы — время начала последней полученной записи).
+    pub fn recent_plays(
+        &self,
+        before_ms: Option<i64>,
+        limit: usize,
+    ) -> Result<Vec<PlayRecord>, CoreError> {
+        let history = self
+            .inner()
+            .history
+            .as_ref()
+            .ok_or(CoreError::MissingPort("history"))?;
+        history
+            .recent(before_ms, limit)
+            .map_err(|e| CoreError::History(e.0))
     }
 
     /// Выполнить команду.
@@ -219,6 +332,10 @@ impl Core {
                     return Err(CoreError::InvalidQueue);
                 }
                 inner.update(|s| {
+                    inner.report(|at| Report::Ended {
+                        outcome: Outcome::Skipped,
+                        at,
+                    });
                     let repeat = s.queue.repeat;
                     s.queue = Queue::new(tracks, start);
                     s.queue.repeat = repeat;
@@ -231,6 +348,7 @@ impl Core {
                 inner.update(|s| {
                     if s.state.current.is_some() && s.state.status != PlaybackStatus::Stopped {
                         s.state.status = PlaybackStatus::Paused;
+                        inner.report(|at| Report::Paused { at });
                     }
                 });
             }
@@ -240,14 +358,23 @@ impl Core {
                     inner.engine.resume();
                     if s.state.current.is_some() {
                         s.state.status = PlaybackStatus::Playing;
+                        inner.report(|at| Report::Resumed { at });
                     }
                 }
             }),
             Command::Stop => inner.update(|s| {
+                inner.report(|at| Report::Ended {
+                    outcome: Outcome::Stopped,
+                    at,
+                });
                 s.epoch = inner.engine.stop();
                 stop_session(s);
             }),
             Command::Next => inner.update(|s| {
+                inner.report(|at| Report::Ended {
+                    outcome: Outcome::Skipped,
+                    at,
+                });
                 if s.queue.peek(1).is_some() {
                     s.queue.advance();
                     s.skips = 0;
@@ -261,15 +388,20 @@ impl Core {
             Command::Previous => {
                 let position = inner.engine.playhead().map_or(0, |p| p.position_ms);
                 if position > RESTART_THRESHOLD_MS {
-                    inner.engine.seek(0);
+                    inner.restart();
                 } else {
                     inner.update(|s| {
+                        inner.report(|at| Report::Ended {
+                            outcome: Outcome::Skipped,
+                            at,
+                        });
                         s.queue.back();
                         s.skips = 0;
                         inner.start_current(s);
                     });
                 }
             }
+            Command::Seek { position_ms: 0 } => inner.restart(),
             Command::Seek { position_ms } => inner.engine.seek(position_ms),
             Command::SetRepeat(mode) => inner.update(|s| {
                 s.queue.repeat = mode;
@@ -304,12 +436,21 @@ impl Core {
 
 impl Drop for Core {
     fn drop(&mut self) {
-        // Последняя сильная ссылка: движок останавливается, канал событий закрывается.
+        if let Some(inner) = &self.inner {
+            inner.report(|at| Report::Ended {
+                outcome: Outcome::Stopped,
+                at,
+            });
+        }
+        // Последняя сильная ссылка: движок останавливается, каналы событий и истории закрываются.
         drop(self.inner.take());
-        if let Some(events) = self.events.take() {
-            // Ядро удалили из колбэка наблюдателя — поток событий завершится сам.
-            if events.thread().id() != thread::current().id() {
-                let _ = events.join();
+        // Ядро удалили из колбэка наблюдателя — этот поток завершится сам.
+        for handle in [self.events.take(), self.history.take()]
+            .into_iter()
+            .flatten()
+        {
+            if handle.thread().id() != thread::current().id() {
+                let _ = handle.join();
             }
         }
     }
@@ -335,14 +476,56 @@ struct Session {
 struct Inner {
     engine: Engine,
     library: Arc<dyn TrackStore>,
+    history: Option<Arc<dyn HistoryStore>>,
+    /// Факты для потока истории; `None` — история не ведётся.
+    reports: Option<mpsc::Sender<Report>>,
+    clock: Arc<dyn Clock>,
     observer: Arc<dyn Observer>,
     media_session: Option<Arc<dyn MediaSession>>,
     http: Option<Arc<dyn HttpTransport>>,
-    secrets: Option<Arc<dyn SecureStore>>,
+    scrobbling: bool,
     session: Mutex<Session>,
 }
 
 impl Inner {
+    /// Сообщить факт потоку истории. Вызывается под блокировкой сессии,
+    /// поэтому факты идут в том же порядке, что и изменения состояния.
+    fn report(&self, make: impl FnOnce(Stamp) -> Report) {
+        if let Some(reports) = &self.reports {
+            let at = Stamp {
+                mono_ms: self.clock.monotonic_ms(),
+                unix_ms: self.clock.unix_ms(),
+            };
+            let _ = reports.send(make(at));
+        }
+    }
+
+    /// Текущий трек зазвучал (или зазвучал заново).
+    fn report_started(&self, s: &Session) {
+        if let Some(track) = &s.state.current {
+            self.report(|at| Report::Started {
+                track: Box::new(track.clone()),
+                at,
+            });
+            if s.state.status == PlaybackStatus::Paused {
+                self.report(|at| Report::Paused { at });
+            }
+        }
+    }
+
+    /// Текущий трек — с начала: это новое прослушивание (§18.7).
+    fn restart(&self) {
+        self.engine.seek(0);
+        let s = lock(&self.session);
+        if s.state.status != PlaybackStatus::Stopped && s.starting.is_none() {
+            self.report(|at| Report::Ended {
+                outcome: Outcome::Skipped,
+                at,
+            });
+            self.report_started(&s);
+        }
+    }
+
     /// Изменить сессию, затем — уже без блокировки — разослать события и новое состояние.
     fn update<R>(&self, f: impl FnOnce(&mut Session) -> R) -> R {
         let (result, outbox, state) = {
@@ -368,10 +551,10 @@ impl Inner {
 
     /// Подставить позицию, которая звучит прямо сейчас, если это текущий трек.
     fn with_live_position(&self, mut state: PlayerState) -> PlayerState {
-        if let (Some(playhead), Some(track)) = (self.engine.playhead(), &state.current) {
-            if playhead.track == track.id {
-                state.position_ms = playhead.position_ms;
-            }
+        if let (Some(playhead), Some(track)) = (self.engine.playhead(), &state.current)
+            && playhead.track == track.id
+        {
+            state.position_ms = playhead.position_ms;
         }
         state
     }
@@ -437,6 +620,8 @@ impl Inner {
                 s.state.queue_position = s.queue.position();
                 s.starting = None;
                 s.skips = 0;
+                // Незакрытое прослушивание поток истории закроет как дослушанное.
+                self.report_started(s);
             }),
             EngineEvent::Preloading { track } => {
                 let mut s = lock(&self.session);
@@ -456,6 +641,10 @@ impl Inner {
             }),
             EngineEvent::Finished => self.update(|s| {
                 if s.epoch == epoch {
+                    self.report(|at| Report::Ended {
+                        outcome: Outcome::Finished,
+                        at,
+                    });
                     stop_session(s);
                 }
             }),
@@ -464,6 +653,9 @@ impl Inner {
                     return;
                 }
                 s.outbox.push(Event::Error(message));
+                if let Some(track) = track {
+                    self.report(|at| Report::Failed { track, at });
+                }
                 // Если не открылся следующий трек, делать ничего не нужно: движок
                 // сам возьмёт следующий из списка (`LOOKAHEAD`) без паузы.
                 if track.is_some() && track == s.starting {

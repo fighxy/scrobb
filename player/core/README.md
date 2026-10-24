@@ -13,15 +13,17 @@ player/core/                 Cargo workspace
     scrobb-sync/             синхронизация рейтингов и плейлистов (заготовка)  ─┘
     player-domain/           треки, состояние, окна списков                    ─┐ общий ярус плеера:
     player-playback/         очередь, повтор, взгляд вперёд                     │ собирается под wasm32
-    player-history/          история и превращение прослушиваний в скробблы   ─┘
+    player-history/          история: модель, трейт хранилища, скробблы        ─┘
     player-ports/            порты: звук, медиасессия, файлы, секреты, сеть, часы ─┐
     player-engine/           звуковой движок: gapless, ReplayGain, перемотка      │ нативный
     player-output-cpal/      вывод звука через cpal (адаптер порта AudioOutput)   │
     player-library/          трек по id (в памяти); SQLite, поиск — позже         │ ярус плеера
+    player-store-sqlite/     SQLite: история прослушиваний и очередь отправки     │
     player-metadata/         MusicBrainz, AcoustID, кодировки (заготовка)         │
     player-plugins/          хост WASM-плагинов (заготовка)                       │
-    player-core/             фасад: очередь + библиотека + движок, события      ─┘
-    player-testkit/          обвязка тестов: ручной вывод звука, фикстуры (ffmpeg)
+    player-core/             фасад: очередь + библиотека + движок + история      ─┘
+    player-testkit/          обвязка тестов: ручной вывод звука, часы, фикстуры,
+                             общие проверки хранилищ истории
   bindings/
     ffi/                     → Swift и Kotlin для нативных оболочек (UniFFI, позже)
     wasm/                    → npm-пакет для веб-приложения Scrobb и расширения (wasm-bindgen, позже)
@@ -35,7 +37,7 @@ player/core/                 Cargo workspace
 |---|---|---|---|
 | **Scrobb** | `scrobb-api`, `scrobb-rules`, `scrobb-client`, `scrobb-sync` | Плеер; десктоп-клиент Scrobb на Tauri (тоже Rust, [architecture.md](../../docs/architecture.md) §18.12); веб-приложение и расширение через `bindings/wasm` | Без ввода-вывода, системного времени и потоков; собирается под `wasm32-unknown-unknown`; не зависит от `player-*` |
 | **Плеер, общий** | `player-domain`, `player-playback`, `player-history` | Ядро плеера; при желании — веб (например, веб-плеер на сайте) | Те же, что у яруса Scrobb |
-| **Плеер, нативный** | `player-ports`, `player-engine`, `player-output-cpal`, `player-library`, `player-metadata`, `player-plugins`, `player-core` | Только плеер | Всё платформенное — только через порты |
+| **Плеер, нативный** | `player-ports`, `player-engine`, `player-output-cpal`, `player-library`, `player-store-sqlite`, `player-metadata`, `player-plugins`, `player-core` | Только плеер | Всё платформенное — только через порты |
 | **Привязки** | `bindings/ffi`, `bindings/wasm` | Оболочки на SwiftUI и Compose; веб и расширение | Наружу — только фасад `player-core` (ffi) и ярус Scrobb (wasm) |
 
 ## Правила зависимостей
@@ -64,7 +66,7 @@ cd player/core
 scripts/check.sh
 ```
 
-Нужен Rust 1.85+ (edition 2024). Для проверки под wasm: `rustup target add wasm32-unknown-unknown`; без этой цели шаг пропускается с предупреждением.
+Нужен Rust 1.89+ (edition 2024; столько требуют текущие `rusqlite` и `uuid`). Для встроенной SQLite нужен компилятор C. Для проверки под wasm: `rustup target add wasm32-unknown-unknown`; без этой цели шаг пропускается с предупреждением.
 
 ## Звуковой движок
 
@@ -125,12 +127,43 @@ cargo run --release -p player-output-cpal --example play -- --rate=48000 a.flac 
 
 Отдельный тест с задержанным потоком событий детерминированно воспроизводит запоздавшее событие. Без фильтра по эпохам он падает. Стабильность проверена 240 параллельными прогонами.
 
-Пока не подключены: история и скробблинг, сеть, привязка аккаунта Scrobb, медиасессии ОС (порт есть, адаптеров нет).
+Пока не подключены: привязка аккаунта Scrobb, «сейчас играет», медиасессии ОС (порт есть, адаптеров нет).
+
+## История и скробблинг
+
+Формат, база, синхронизация и будущие сервисы — в [player-history.md](../../docs/player-history.md). Коротко:
+
+- **Хранилище — SQLite**, отдельный файл `history.db` (`player-store-sqlite`): режим WAL, таблицы `STRICT`, миграции по `PRAGMA user_version`. Ядро видит его через трейт `HistoryStore` из `player-history`. Для тестов есть `MemoryHistory`; оба хранилища проходят одни и те же проверки из `player-testkit`.
+- **Запись — каждое прослушивание**, включая пропуски. В записи есть:
+  - id — UUIDv7, он же `client_id` при отправке;
+  - снимок метаданных;
+  - реальное время звучания (без пауз и перемоток);
+  - исход: `finished`, `skipped`, `stopped`, `error`, `interrupted`;
+  - флаг «засчитано».
+- **Поток истории** (`player-core-history`) получает от фасада факты и сам ведёт счётчик `scrobb-rules::ListenTracker`.
+  - Каждые 15 с звучания сохраняет контрольную точку.
+  - После падения закрывает незакрытые записи как `interrupted`.
+  - Засчитанное сразу ставит в очередь и отправляет пачками до 50, через порт `HttpTransport` и `scrobb-client`.
+  - Повторы — `scrobb_client::retry::Backoff`: 30 с – 1 ч, `Retry-After`; `401` и `426` останавливают отправку без потери очереди.
+  - Лимиты очереди — 14 дней и 10 000 записей.
+- **Отправка включается**, когда в `CoreConfig::scrobb` задан сервер, есть порты сети и секретов, а в `SecureStore` лежит токен устройства (`SCROBB_TOKEN_KEY`). Без токена история пишется, но в очередь ничего не ставится.
+- **Оболочке:** событие `Event::Scrobbling { pending, state }` («в очереди N», «войдите заново») и лента `Core::recent_plays(before_ms, limit)`.
+
+Тесты (`crates/player-core/tests/history.rs`) идут с подделанным сервером Scrobb и часами, которые двигает тест:
+- исходы и время звучания при «Дальше», бесшовном переходе и «Стопе»;
+- пауза не считается, перемотка в начало — новое прослушивание;
+- отправка сразу после порога с id записи;
+- `401` с сохранением очереди до новой привязки;
+- повтор после ошибки сети;
+- непривязанное устройство не копит очередь;
+- восстановление после падения.
+
+Проверено, что тесты ловят ошибки: каждая из шести внесённых поломок роняет хотя бы один тест.
 
 ## Что дальше
 
 По порядку из [player-architecture.md](../../docs/player-architecture.md) §9:
-1. История и скробблинг в фасаде: события движка → `scrobb-rules` → `player-history` → очередь отправки в Scrobb. Затем — спайк фонового воспроизведения в минимальных оболочках на Android и iOS.
+1. Привязка устройства к аккаунту Scrobb (RFC 8628, `LinkScrobbAccount`) и «сейчас играет». Затем — спайк фонового воспроизведения в минимальных оболочках на Android и iOS.
 2. UniFFI в `bindings/ffi`: Swift и Kotlin, callback-интерфейсы для `Observer` и портов.
 3. Библиотека: lofty, SQLite + FTS5, окна списков.
 4. `bindings/wasm`: wasm-bindgen и npm-пакет для веба и расширения.
@@ -139,4 +172,6 @@ cargo run --release -p player-output-cpal --example play -- --rate=48000 a.flac 
 
 Не выбрана: это открытый вопрос о лицензии своих клиентов ([architecture.md](../../docs/architecture.md) §16, п. 41). Пока везде `publish = false`.
 
-Лицензии зависимостей движка: Symphonia — MPL-2.0 (копилефт на уровне файлов: изменения в её файлах нужно публиковать, наш код — нет), rtrb и rubato — MIT/Apache-2.0, cpal — Apache-2.0.
+Лицензии зависимостей:
+- движок: Symphonia — MPL-2.0 (копилефт на уровне файлов: изменения в её файлах нужно публиковать, наш код — нет), rtrb и rubato — MIT/Apache-2.0, cpal — Apache-2.0;
+- история: rusqlite — MIT, сама SQLite — общественное достояние, uuid и getrandom — MIT/Apache-2.0.

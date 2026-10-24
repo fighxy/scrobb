@@ -83,7 +83,7 @@ flowchart TB
 | `engine` | Декодирование, ресемплинг, ReplayGain, эквалайзер, кроссфейд, gapless: предзагрузка следующего трека и обрезка задержки и паддинга кодера | [Symphonia](https://docs.rs/symphonia/) (чистый Rust). Ограничения: gapless есть не во всех контейнерах (в 0.5 нет для MP4 и MKV), HE-AAC и Opus — за отдельными флагами и без явного статуса ([wiki](https://github.com/pdeljanov/Symphonia/wiki)). Поэтому нужен **порт `Decoder` с запасными платформенными декодерами** (MediaCodec, AudioToolbox, Media Foundation) и необязательный FFmpeg на десктопе. libfdk-aac не брать: лицензия несовместима с GPL **(не проверено юристом)** |
 | `playback` | Очереди (в том числе несколько, как в Musicolet), перемешивание, повтор, автомат состояний, восстановление позиции | — |
 | `library` | Сканер, чтение и запись тегов, обложки, база, поиск, умные плейлисты (свой язык запросов → SQL), слежение за изменениями через порт | `lofty` (теги), `rusqlite` + FTS5, `chardetng` / `encoding_rs` — определение cp1251 в старых тегах ([local-players-research.md](local-players-research.md) §4, п. 5) |
-| `history` | События прослушивания (старт, пауза, перемотка, пропуск, конец), порог засчитывания, локальная статистика | Правила — как в [architecture.md](architecture.md) §18.7 |
+| `history` | События прослушивания (старт, пауза, перемотка, пропуск, конец), порог засчитывания, локальная статистика | Правила — как в [architecture.md](architecture.md) §18.7; формат, база и синхронизация — [player-history.md](player-history.md) |
 | `scrobble` | Родной API Scrobb, ListenBrainz, Last.fm 2.0; офлайн-очередь, пачки, повторы | Логика — как в [architecture.md](architecture.md) §18.8 |
 | `sync` | Синхронизация рейтингов, плейлистов, истории и позиций через аккаунт; сами файлы не передаются | «Последняя запись побеждает» по каждому полю с гибридными логическими часами; плейлисты — как упорядоченные списки с операциями. Нужны новые эндпоинты бэкенда |
 | `metadata` | MusicBrainz, AcoustID-отпечатки, обложки, тексты (LRC) | Chromaprint или его порт на Rust **(не проверено)** |
@@ -173,7 +173,7 @@ player/
     crates/
       scrobb-api/  scrobb-rules/  scrobb-client/  scrobb-sync/     # ярус Scrobb (wasm32)
       player-domain/  player-playback/  player-history/            # общий ярус плеера (wasm32)
-      player-ports/  player-engine/  player-library/
+      player-ports/  player-engine/  player-library/  player-store-sqlite/
       player-metadata/  player-plugins/  player-core/              # нативный ярус плеера
     bindings/
       ffi/                # UniFFI → Swift, Kotlin
@@ -200,6 +200,7 @@ player/
 
 - **Правило скроббла** ([architecture.md](architecture.md) §18.7) — крейт `scrobb-rules`, сверяется с языконезависимыми векторами [`contracts/scrobble-rules/v1.json`](../contracts/scrobble-rules/v1.json). Те же векторы должны проходить бэкенд (повторная проверка, §11.1, шаг 6) и TypeScript-код. Сейчас `scrobbler-core` запланирован на TypeScript (§18.12); каркас показывает альтернативу — одна реализация на Rust, в веб она попадает через wasm. Решение — вместе с выбором стека десктоп-клиента (§16, п. 42).
 - **Протокол** ([architecture.md](architecture.md) §18.3–§18.4) — DTO в `scrobb-api`, клиент в стиле sans-IO в `scrobb-client`: он строит запросы и разбирает ответы, а сеть даёт вызывающий код. Поэтому один код протокола работает в плеере, в Tauri-клиенте и в браузере. Задержки повторов (§18.8) — там же. Позже DTO генерируются из OpenAPI бэкенда.
+- **История и скробблинг** — [player-history.md](player-history.md): SQLite, неизменяемые записи с UUIDv7, очередь отправки по сервисам, формат экспорта ListenBrainz. Первая часть уже работает в фасаде.
 - **Синхронизация рейтингов и плейлистов** — `scrobb-sync`: ключ трека, общий с сервером, и правки «последняя запись побеждает» на гибридных логических часах. Требует новых эндпоинтов, модели данных на сервере и общего с бэкендом `match_key` (§5.3) — вне этапа 1. Те же данные показывает и правит веб-приложение.
 - **Изменения на бэкенде, когда плеер появится:** новое значение `player` в `source.kind` и `client_kind` (сейчас только `extension` и `desktop`).
 

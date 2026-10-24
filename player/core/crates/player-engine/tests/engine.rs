@@ -415,11 +415,11 @@ fn play_and_stop_start_new_epochs() {
     loop {
         assert!(Instant::now() < deadline, "трек не зазвучал");
         output.pull(1024);
-        if let Ok(m) = rx.try_recv() {
-            if let EngineEvent::TrackStarted { track, .. } = m.event {
-                assert_eq!((track, m.epoch), (TrackId(2), second));
-                break;
-            }
+        if let Ok(m) = rx.try_recv()
+            && let EngineEvent::TrackStarted { track, .. } = m.event
+        {
+            assert_eq!((track, m.epoch), (TrackId(2), second));
+            break;
         }
     }
     assert!(engine.stop() > second);

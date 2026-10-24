@@ -294,10 +294,8 @@ impl PcmSource for RtSource {
         }
 
         out[frame * ch..].fill(0.0);
-        if consumed_any {
-            if let Some(segment) = self.segment {
-                self.shared.set_playhead(segment, self.played);
-            }
+        if consumed_any && let Some(segment) = self.segment {
+            self.shared.set_playhead(segment, self.played);
         }
         frame * ch
     }

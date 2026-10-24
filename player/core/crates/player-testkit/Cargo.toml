@@ -1,6 +1,6 @@
 [package]
 name = "player-testkit"
-description = "Общая обвязка тестов ядра: ручной вывод звука и тестовые файлы"
+description = "Общая обвязка тестов ядра: ручной вывод звука, тестовые файлы, часы, проверки истории"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,6 +9,7 @@ publish.workspace = true
 [dependencies]
 player-domain.workspace = true
 player-ports.workspace = true
+player-history.workspace = true
 
 [lints]
 workspace = true

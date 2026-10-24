@@ -5,16 +5,21 @@
 //! - [`Fixtures`] — файлы из `fixtures/` (генерирует `fixtures/generate.sh`
 //!   через ffmpeg) за портом `FileAccess`;
 //! - [`read_wav`] — эталон, прочитанный без Symphonia, чтобы не зависеть
-//!   от проверяемого декодера.
+//!   от проверяемого декодера;
+//! - [`ManualClock`] — часы, которые двигает тест;
+//! - [`history`] — общие проверки любого `HistoryStore`.
 
 use std::io::Cursor;
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use player_domain::MediaUri;
 use player_ports::{
-    AudioOutput, FileAccess, FileEntry, MediaStream, PcmFormat, PcmSource, PortError,
+    AudioOutput, Clock, FileAccess, FileEntry, MediaStream, PcmFormat, PcmSource, PortError,
 };
+
+pub mod history;
 
 /// Папка с тестовыми файлами.
 pub const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures");
@@ -124,6 +129,39 @@ pub fn read_wav(name: &str) -> Vec<f32> {
         .chunks_exact(2)
         .map(|b| f32::from(i16::from_le_bytes([b[0], b[1]])) / 32768.0)
         .collect()
+}
+
+/// Часы, которые двигает тест: монотонное и Unix-время идут вместе.
+#[derive(Debug, Default)]
+pub struct ManualClock {
+    monotonic_ms: AtomicU64,
+    unix_ms: AtomicI64,
+}
+
+impl ManualClock {
+    /// Часы, показывающие `unix_ms`.
+    pub fn new(unix_ms: i64) -> Arc<Self> {
+        Arc::new(Self {
+            monotonic_ms: AtomicU64::new(0),
+            unix_ms: AtomicI64::new(unix_ms),
+        })
+    }
+
+    /// Сдвинуть время вперёд.
+    pub fn advance(&self, ms: u64) {
+        self.monotonic_ms.fetch_add(ms, Ordering::SeqCst);
+        self.unix_ms.fetch_add(ms as i64, Ordering::SeqCst);
+    }
+}
+
+impl Clock for ManualClock {
+    fn monotonic_ms(&self) -> u64 {
+        self.monotonic_ms.load(Ordering::SeqCst)
+    }
+
+    fn unix_ms(&self) -> i64 {
+        self.unix_ms.load(Ordering::SeqCst)
+    }
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {

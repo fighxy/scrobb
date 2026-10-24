@@ -1,0 +1,19 @@
+[package]
+name = "player-store-sqlite"
+description = "Хранилища ядра на SQLite: история прослушиваний и очередь доставки"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+player-domain.workspace = true
+player-history.workspace = true
+rusqlite.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+player-testkit.workspace = true

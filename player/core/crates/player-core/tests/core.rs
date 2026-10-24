@@ -2,16 +2,17 @@
 //! и обратно — события движка → состояние → наблюдатель.
 
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use player_core::{Command, Core, CoreConfig, CoreError, Event, Observer, Ports};
-use player_domain::{
-    MediaUri, PlaybackStatus, PlayerState, RepeatMode, ReplayGain, Track, TrackId,
-};
-use player_engine::{EngineConfig, GainConfig, ReplayGainMode};
+use player_core::{Command, Core, CoreConfig, CoreError, Event, Observer, Ports, Stores};
+use player_domain::{PlaybackStatus, RepeatMode, TrackId};
 use player_library::MemoryLibrary;
 use player_ports::Clock;
 use player_testkit::{FULL_FRAMES, Fixtures, ManualOutput, read_wav};
+
+mod common;
+
+use common::{Recorder, engine_config, play, play_until, play_until_seen, playing, stopped, track};
 
 struct FixedClock;
 
@@ -25,67 +26,10 @@ impl Clock for FixedClock {
     }
 }
 
-/// Наблюдатель, который запоминает события.
-#[derive(Default)]
-struct Recorder(Mutex<Vec<Event>>);
-
-impl Observer for Recorder {
-    fn on_event(&self, event: Event) {
-        self.0.lock().unwrap().push(event);
-    }
-}
-
-impl Recorder {
-    /// Сколько событий уже пришло: отметка, с которой ждать новых.
-    fn mark(&self) -> usize {
-        self.0.lock().unwrap().len()
-    }
-
-    /// Было ли после отметки состояние, подходящее под `pred`.
-    fn seen_since(&self, mark: usize, pred: &impl Fn(&PlayerState) -> bool) -> bool {
-        self.0.lock().unwrap()[mark..]
-            .iter()
-            .any(|e| matches!(e, Event::State(s) if pred(s)))
-    }
-
-    fn errors(&self) -> Vec<String> {
-        self.0
-            .lock()
-            .unwrap()
-            .iter()
-            .filter_map(|e| match e {
-                Event::Error(message) => Some(message.clone()),
-                _ => None,
-            })
-            .collect()
-    }
-
-    fn states(&self) -> Vec<PlayerState> {
-        self.0
-            .lock()
-            .unwrap()
-            .iter()
-            .filter_map(|e| match e {
-                Event::State(state) => Some((**state).clone()),
-                _ => None,
-            })
-            .collect()
-    }
-}
-
-fn track(id: u64, file: &str) -> Track {
-    Track {
-        id: TrackId(id),
-        uri: MediaUri(file.into()),
-        title: file.into(),
-        artists: vec!["Тест".into()],
-        album: None,
-        album_artist: None,
-        duration_ms: None,
-        track_no: None,
-        disc_no: None,
-        recording_mbid: None,
-        replay_gain: ReplayGain::default(),
+fn stores(library: MemoryLibrary) -> Stores {
+    Stores {
+        library: Arc::new(library),
+        history: None,
     }
 }
 
@@ -104,87 +48,11 @@ fn core(output: &ManualOutput, tracks: &[(u64, &str)]) -> (Core, Arc<Recorder>) 
         media_session: None,
     };
     let config = CoreConfig {
-        engine: EngineConfig {
-            gain: GainConfig {
-                mode: ReplayGainMode::Off,
-                ..GainConfig::default()
-            },
-            buffer_ms: 500,
-            ..EngineConfig::default()
-        },
+        engine: engine_config(),
+        ..CoreConfig::default()
     };
-    let core = Core::new(ports, Arc::new(library), config, recorder.clone());
+    let core = Core::new(ports, stores(library), config, recorder.clone());
     (core, recorder)
-}
-
-fn play(ids: &[u64], start: usize) -> Command {
-    Command::PlayQueue {
-        tracks: ids.iter().map(|&id| TrackId(id)).collect(),
-        start,
-    }
-}
-
-/// «Играть» — забирать звук, как устройство, — пока состояние не станет нужным.
-#[track_caller]
-fn play_until(core: &Core, output: &ManualOutput, pred: impl Fn(&PlayerState) -> bool) -> Vec<f32> {
-    let deadline = Instant::now() + Duration::from_secs(10);
-    let mut played = Vec::new();
-    loop {
-        if pred(&core.state()) {
-            return played;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "состояние не наступило: {:?}",
-            core.state()
-        );
-        let chunk = output.pull(1024);
-        if chunk.is_empty() {
-            std::thread::sleep(Duration::from_millis(1));
-        }
-        played.extend(chunk);
-    }
-}
-
-/// «Играть», пока после отметки `mark` не придёт подходящее состояние. Смотрим
-/// историю, а не текущее состояние: короткий трек может доиграть раньше, чем
-/// тест успеет его увидеть. Звук берётся по куску, с паузой на обработку событий.
-#[track_caller]
-fn play_until_seen(
-    output: &ManualOutput,
-    recorder: &Recorder,
-    mark: usize,
-    pred: impl Fn(&PlayerState) -> bool,
-) -> Vec<f32> {
-    let deadline = Instant::now() + Duration::from_secs(10);
-    let mut played = Vec::new();
-    while !recorder.seen_since(mark, &pred) {
-        assert!(
-            Instant::now() < deadline,
-            "состояние не наступило; последнее: {:?}",
-            recorder.states().last().map(|s| (
-                s.status,
-                s.current.as_ref().map(|t| t.id),
-                s.queue_position
-            ))
-        );
-        played.extend(output.pull(1024));
-        // Дать потоку событий ядра догнать звук: тест «играет» быстрее реального
-        // времени, и без паузы успел бы прокрутить трек раньше, чем о нём узнает ядро.
-        let catch_up = Instant::now() + Duration::from_millis(20);
-        while Instant::now() < catch_up && !recorder.seen_since(mark, &pred) {
-            std::thread::sleep(Duration::from_millis(1));
-        }
-    }
-    played
-}
-
-fn playing(id: u64) -> impl Fn(&PlayerState) -> bool {
-    move |s| s.status == PlaybackStatus::Playing && s.current.as_ref().is_some_and(|t| t.id.0 == id)
-}
-
-fn stopped(s: &PlayerState) -> bool {
-    s.status == PlaybackStatus::Stopped
 }
 
 #[test]
@@ -351,7 +219,7 @@ fn observer_may_dispatch_from_callback() {
     };
     let core = Arc::new(Core::new(
         ports,
-        Arc::new(library),
+        stores(library),
         CoreConfig::default(),
         observer.clone(),
     ));
@@ -397,12 +265,7 @@ fn late_events_of_cancelled_playback_are_ignored() {
         secrets: None,
         media_session: None,
     };
-    let core = Core::new(
-        ports,
-        Arc::new(library),
-        CoreConfig::default(),
-        gate.clone(),
-    );
+    let core = Core::new(ports, stores(library), CoreConfig::default(), gate.clone());
     core.dispatch(play(&[1, 2], 0)).unwrap();
     // Доиграть первый трек и начало второго: движок сообщит «трек 2 начался»,
     // но поток событий ядра стоит у шлагбаума.
