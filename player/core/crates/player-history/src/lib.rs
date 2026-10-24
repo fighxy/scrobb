@@ -14,7 +14,7 @@
 use std::collections::BTreeMap;
 
 use player_domain::{Track, TrackId};
-use scrobb_api::{ClientKind, ListenSubmission, Mbids, Source};
+use scrobb_api::{ClientKind, ListenSubmission, Mbids, NowPlaying, Source};
 
 mod memory;
 
@@ -289,10 +289,26 @@ pub fn submission(play: &PlayRecord) -> ListenSubmission {
             recording: Some(recording),
             ..Mbids::default()
         }),
-        source: Source {
-            kind: ClientKind::Player,
-            connector: CONNECTOR.into(),
-        },
+        source: source(),
+    }
+}
+
+/// «Сейчас играет» для Scrobb (§18.7).
+pub fn now_playing(track: &TrackSnapshot, position_ms: Option<u64>) -> NowPlaying {
+    NowPlaying {
+        track: track.title.clone(),
+        artist: track.artists.join(", "),
+        album: track.album.clone(),
+        duration_ms: track.duration_ms,
+        position_ms,
+        source: source(),
+    }
+}
+
+fn source() -> Source {
+    Source {
+        kind: ClientKind::Player,
+        connector: CONNECTOR.into(),
     }
 }
 
@@ -327,6 +343,13 @@ mod tests {
         assert_eq!(s.played_ms, 200_000);
         assert_eq!(s.source.kind, ClientKind::Player);
         assert!(s.mbids.is_none());
+
+        let np = now_playing(&play.track, Some(1_000));
+        assert_eq!(
+            (np.artist.as_str(), np.position_ms),
+            ("Кино, Виктор Цой", Some(1_000))
+        );
+        assert_eq!(np.source, s.source);
     }
 
     #[test]

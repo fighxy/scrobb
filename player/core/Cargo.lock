@@ -617,6 +617,7 @@ dependencies = [
  "scrobb-client",
  "scrobb-rules",
  "scrobb-sync",
+ "serde",
  "serde_json",
  "uuid",
 ]

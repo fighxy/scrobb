@@ -24,6 +24,12 @@ pub trait Clock: Send + Sync {
     fn monotonic_ms(&self) -> u64;
     /// Миллисекунды Unix UTC.
     fn unix_ms(&self) -> i64;
+    /// Сколько ждать на самом деле, чтобы эти часы ушли вперёд на `ms`.
+    /// У настоящих часов — столько же. Часы, которые двигает тест, отвечают
+    /// коротко: ожидающий поток чаще сверяется с ними и не спит лишнего.
+    fn real_wait(&self, ms: u64) -> std::time::Duration {
+        std::time::Duration::from_millis(ms)
+    }
 }
 
 /// Формат PCM на выходе движка.

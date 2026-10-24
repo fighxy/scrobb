@@ -155,6 +155,15 @@ impl ScrobbClient {
         self.request(Method::Delete, paths::NOW_PLAYING, None)
     }
 
+    /// Разбор ответа без тела: на [`now_playing`](Self::now_playing),
+    /// [`clear_now_playing`](Self::clear_now_playing) и [`sign_out`](Self::sign_out).
+    pub fn parse_empty(&self, resp: &HttpResponse) -> Result<(), ApiError> {
+        match resp.status {
+            200..=299 => Ok(()),
+            _ => parse::<serde_json::Value>(resp).map(drop),
+        }
+    }
+
     /// `POST /api/v1/scrobble/listens`; не больше [`MAX_LISTENS_PER_BATCH`] за раз.
     pub fn submit_listens(&self, listens: &[ListenSubmission]) -> Result<HttpRequest, ApiError> {
         if listens.is_empty() || listens.len() > MAX_LISTENS_PER_BATCH {
@@ -359,6 +368,27 @@ mod tests {
             Err(ApiError::RateLimited {
                 retry_after_s: Some(30)
             })
+        );
+    }
+
+    #[test]
+    fn empty_answers_map_status_codes() {
+        assert_eq!(client().parse_empty(&response(204, "")), Ok(()));
+        assert_eq!(
+            client().parse_empty(&response(401, "")),
+            Err(ApiError::Unauthorized)
+        );
+        assert_eq!(
+            client().parse_empty(&response(503, "")),
+            Err(ApiError::Server(503))
+        );
+        let req = client().clear_now_playing();
+        assert_eq!(
+            (req.method, req.url.as_str()),
+            (
+                Method::Delete,
+                "https://scrobb.ru/api/v1/scrobble/now-playing"
+            )
         );
     }
 

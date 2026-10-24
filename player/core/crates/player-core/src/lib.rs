@@ -7,11 +7,10 @@
 //! (`player-engine`) играет и сообщает, что реально звучит, история
 //! (`player-history`) запоминает прослушивания и отправляет засчитанные.
 //!
-//! События движка обрабатывает отдельный поток, историю и сеть — ещё один.
+//! События движка обрабатывает отдельный поток, историю и связь со Scrobb
+//! (привязка устройства, «сейчас играет», отправка) — ещё один.
 //! Наблюдатель и медиасессия вызываются без удержания блокировок, поэтому
 //! из колбэка можно сразу отправить новую команду.
-//!
-//! Пока не подключены: привязка аккаунта Scrobb и «сейчас играет».
 
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
@@ -27,10 +26,12 @@ use scrobb_api::{ClientKind, Thresholds};
 use scrobb_client::{ClientInfo, ScrobbClient};
 
 mod history;
+mod scrobb;
 
-use history::{Delivery, HistoryService, Report, Stamp};
+use history::{HistoryService, Message, Stamp};
+use scrobb::{Remote, ScrobbPorts};
 
-pub use history::SCROBB_TOKEN_KEY;
+pub use scrobb::SCROBB_TOKEN_KEY;
 
 /// «Назад» в первые 3 секунды трека — предыдущий трек, позже — начало текущего.
 pub const RESTART_THRESHOLD_MS: u64 = 3_000;
@@ -115,11 +116,16 @@ pub enum Command {
     SetRepeat(RepeatMode),
     /// Громкость 0.0–1.0.
     SetVolume(f32),
-    /// Привязать устройство к аккаунту Scrobb (`docs/architecture.md` §18.4).
+    /// Привязать устройство к аккаунту Scrobb (`docs/architecture.md` §18.4):
+    /// придёт [`Event::ScrobbLinkCode`], пользователь подтверждает код на сайте.
     LinkScrobbAccount {
         /// Имя устройства в «Приложениях».
         device_name: String,
     },
+    /// Прервать привязку: пользователь закрыл окно с кодом.
+    CancelScrobbLink,
+    /// Отвязать устройство: отозвать токен и удалить его; очередь сохраняется.
+    UnlinkScrobbAccount,
 }
 
 /// Событие для оболочки.
@@ -127,7 +133,8 @@ pub enum Command {
 pub enum Event {
     /// Новый снимок состояния.
     State(Box<PlayerState>),
-    /// Показать код привязки и открыть страницу на сайте.
+    /// Показать код привязки и открыть страницу на сайте (системным браузером:
+    /// пользователь сверяет код и подтверждает привязку там).
     ScrobbLinkCode {
         /// Код для сверки.
         user_code: String,
@@ -154,6 +161,8 @@ pub struct ScrobbleStatus {
 pub enum ScrobbleState {
     /// Устройство не привязано: история пишется, в очередь ничего не ставится.
     NotLinked,
+    /// Идёт привязка: ждём, пока пользователь подтвердит код на сайте.
+    Linking,
     /// Всё отправляется.
     Ready,
     /// Сеть или сервер недоступны — повтор позже (§18.8).
@@ -188,6 +197,8 @@ pub enum CoreError {
     NotImplemented(&'static str),
     /// Нет нужного адаптера или хранилища.
     MissingPort(&'static str),
+    /// Не задана настройка, например сервер Scrobb в [`CoreConfig::scrobb`].
+    NotConfigured(&'static str),
     /// Пустая очередь или начальная позиция за её пределами.
     InvalidQueue,
     /// Ошибка хранилища истории.
@@ -210,23 +221,36 @@ impl Core {
         config: CoreConfig,
         observer: Arc<dyn Observer>,
     ) -> Self {
-        let scrobbling = ports.http.is_some() && ports.secrets.is_some() && config.scrobb.is_some();
-        let delivery = match (&config.scrobb, &ports.http, &ports.secrets) {
-            (Some(scrobb), Some(http), Some(secrets)) => Some(Delivery {
-                client: ScrobbClient::new(
-                    scrobb.base_url.clone(),
-                    ClientInfo {
-                        kind: ClientKind::Player,
-                        version: scrobb.version.clone(),
-                        platform: scrobb.platform.clone(),
-                    },
-                ),
-                http: http.clone(),
-                secrets: secrets.clone(),
-            }),
-            _ => None,
+        // Связь со Scrobb нужна вся сразу: сеть, секреты, история и адрес сервера.
+        let (scrobb, remote) = match (&ports.http, &ports.secrets, &stores.history, &config.scrobb)
+        {
+            (None, ..) => (Err(CoreError::MissingPort("http")), None),
+            (_, None, ..) => (Err(CoreError::MissingPort("secrets")), None),
+            (_, _, None, _) => (Err(CoreError::MissingPort("history")), None),
+            (_, _, _, None) => (Err(CoreError::NotConfigured("scrobb")), None),
+            (Some(http), Some(secrets), Some(store), Some(settings)) => {
+                let scrobb_ports = ScrobbPorts {
+                    client: ScrobbClient::new(
+                        settings.base_url.clone(),
+                        ClientInfo {
+                            kind: ClientKind::Player,
+                            version: settings.version.clone(),
+                            platform: settings.platform.clone(),
+                        },
+                    ),
+                    http: http.clone(),
+                    secrets: secrets.clone(),
+                };
+                let remote = Remote::new(
+                    scrobb_ports,
+                    store.clone(),
+                    ports.clock.clone(),
+                    observer.clone(),
+                );
+                (Ok(()), Some(remote))
+            }
         };
-        let (reports, history) = match &stores.history {
+        let (messages, history) = match &stores.history {
             Some(store) => {
                 let (tx, rx) = mpsc::channel();
                 let service = HistoryService::new(
@@ -234,7 +258,7 @@ impl Core {
                     ports.clock.clone(),
                     observer.clone(),
                     config.thresholds,
-                    delivery,
+                    remote,
                 );
                 (Some(tx), Some(service.spawn(rx)))
             }
@@ -246,12 +270,11 @@ impl Core {
             engine,
             library: stores.library,
             history: stores.history,
-            reports,
+            messages,
             clock: ports.clock,
             observer,
             media_session: ports.media_session,
-            http: ports.http,
-            scrobbling,
+            scrobb,
             session: Mutex::new(Session {
                 state: PlayerState {
                     volume: 1.0,
@@ -302,7 +325,7 @@ impl Core {
         Capabilities {
             bit_perfect: false,
             install_plugins: !cfg!(target_os = "ios"),
-            scrobbling: self.inner().scrobbling,
+            scrobbling: self.inner().scrobb.is_ok(),
         }
     }
 
@@ -332,7 +355,7 @@ impl Core {
                     return Err(CoreError::InvalidQueue);
                 }
                 inner.update(|s| {
-                    inner.report(|at| Report::Ended {
+                    inner.report(|at| Message::Ended {
                         outcome: Outcome::Skipped,
                         at,
                     });
@@ -348,7 +371,7 @@ impl Core {
                 inner.update(|s| {
                     if s.state.current.is_some() && s.state.status != PlaybackStatus::Stopped {
                         s.state.status = PlaybackStatus::Paused;
-                        inner.report(|at| Report::Paused { at });
+                        inner.report(|at| Message::Paused { at });
                     }
                 });
             }
@@ -358,20 +381,17 @@ impl Core {
                     inner.engine.resume();
                     if s.state.current.is_some() {
                         s.state.status = PlaybackStatus::Playing;
-                        inner.report(|at| Report::Resumed { at });
+                        let position_ms = inner.engine.playhead().map(|p| p.position_ms);
+                        inner.report(|at| Message::Resumed { at, position_ms });
                     }
                 }
             }),
             Command::Stop => inner.update(|s| {
-                inner.report(|at| Report::Ended {
-                    outcome: Outcome::Stopped,
-                    at,
-                });
                 s.epoch = inner.engine.stop();
-                stop_session(s);
+                inner.stop_session(s);
             }),
             Command::Next => inner.update(|s| {
-                inner.report(|at| Report::Ended {
+                inner.report(|at| Message::Ended {
                     outcome: Outcome::Skipped,
                     at,
                 });
@@ -382,7 +402,7 @@ impl Core {
                 } else {
                     // Конец очереди: остановиться на последнем треке.
                     s.epoch = inner.engine.stop();
-                    stop_session(s);
+                    inner.stop_session(s);
                 }
             }),
             Command::Previous => {
@@ -391,7 +411,7 @@ impl Core {
                     inner.restart();
                 } else {
                     inner.update(|s| {
-                        inner.report(|at| Report::Ended {
+                        inner.report(|at| Message::Ended {
                             outcome: Outcome::Skipped,
                             at,
                         });
@@ -421,13 +441,17 @@ impl Core {
                 inner.engine.set_volume(volume);
                 inner.update(|s| s.state.volume = volume.clamp(0.0, 1.0));
             }
-            Command::LinkScrobbAccount { .. } => {
-                if inner.http.is_none() {
-                    return Err(CoreError::MissingPort("http"));
-                }
-                return Err(CoreError::NotImplemented(
-                    "привязка: сетевой поток не подключён",
-                ));
+            Command::LinkScrobbAccount { device_name } => {
+                inner.scrobb.clone()?;
+                inner.report(|_| Message::Link { device_name });
+            }
+            Command::CancelScrobbLink => {
+                inner.scrobb.clone()?;
+                inner.report(|_| Message::CancelLink);
+            }
+            Command::UnlinkScrobbAccount => {
+                inner.scrobb.clone()?;
+                inner.report(|_| Message::Unlink);
             }
         }
         Ok(())
@@ -436,11 +460,9 @@ impl Core {
 
 impl Drop for Core {
     fn drop(&mut self) {
+        // Закрыть открытое прослушивание и снять «сейчас играет».
         if let Some(inner) = &self.inner {
-            inner.report(|at| Report::Ended {
-                outcome: Outcome::Stopped,
-                at,
-            });
+            inner.report(|at| Message::Stopped { at });
         }
         // Последняя сильная ссылка: движок останавливается, каналы событий и истории закрываются.
         drop(self.inner.take());
@@ -477,38 +499,47 @@ struct Inner {
     engine: Engine,
     library: Arc<dyn TrackStore>,
     history: Option<Arc<dyn HistoryStore>>,
-    /// Факты для потока истории; `None` — история не ведётся.
-    reports: Option<mpsc::Sender<Report>>,
+    /// Сообщения потоку истории; `None` — история не ведётся.
+    messages: Option<mpsc::Sender<Message>>,
     clock: Arc<dyn Clock>,
     observer: Arc<dyn Observer>,
     media_session: Option<Arc<dyn MediaSession>>,
-    http: Option<Arc<dyn HttpTransport>>,
-    scrobbling: bool,
+    /// Доступна ли связь со Scrobb; если нет — почему.
+    scrobb: Result<(), CoreError>,
     session: Mutex<Session>,
 }
 
 impl Inner {
-    /// Сообщить факт потоку истории. Вызывается под блокировкой сессии,
-    /// поэтому факты идут в том же порядке, что и изменения состояния.
-    fn report(&self, make: impl FnOnce(Stamp) -> Report) {
-        if let Some(reports) = &self.reports {
+    /// Сообщить потоку истории. Факты вызываются под блокировкой сессии,
+    /// поэтому идут в том же порядке, что и изменения состояния.
+    fn report(&self, make: impl FnOnce(Stamp) -> Message) {
+        if let Some(messages) = &self.messages {
             let at = Stamp {
                 mono_ms: self.clock.monotonic_ms(),
                 unix_ms: self.clock.unix_ms(),
             };
-            let _ = reports.send(make(at));
+            let _ = messages.send(make(at));
         }
+    }
+
+    /// Остановка: трек и позиция в очереди сохраняются, чтобы «играть» начало заново.
+    fn stop_session(&self, s: &mut Session) {
+        s.state.status = PlaybackStatus::Stopped;
+        s.state.position_ms = 0;
+        s.starting = None;
+        s.decoding = None;
+        self.report(|at| Message::Stopped { at });
     }
 
     /// Текущий трек зазвучал (или зазвучал заново).
     fn report_started(&self, s: &Session) {
         if let Some(track) = &s.state.current {
-            self.report(|at| Report::Started {
+            self.report(|at| Message::Started {
                 track: Box::new(track.clone()),
                 at,
             });
             if s.state.status == PlaybackStatus::Paused {
-                self.report(|at| Report::Paused { at });
+                self.report(|at| Message::Paused { at });
             }
         }
     }
@@ -518,7 +549,7 @@ impl Inner {
         self.engine.seek(0);
         let s = lock(&self.session);
         if s.state.status != PlaybackStatus::Stopped && s.starting.is_none() {
-            self.report(|at| Report::Ended {
+            self.report(|at| Message::Ended {
                 outcome: Outcome::Skipped,
                 at,
             });
@@ -563,14 +594,14 @@ impl Inner {
     fn start_current(&self, s: &mut Session) {
         loop {
             let Some(id) = s.queue.current() else {
-                return stop_session(s);
+                return self.stop_session(s);
             };
             let Some(track) = self.library.track(id) else {
                 s.outbox
                     .push(Event::Error(format!("трека {} нет в библиотеке", id.0)));
                 s.skips += 1;
                 if s.skips >= MAX_SKIPS.min(s.queue.len()) || s.queue.advance().is_none() {
-                    return stop_session(s);
+                    return self.stop_session(s);
                 }
                 continue;
             };
@@ -637,15 +668,16 @@ impl Inner {
             EngineEvent::Seeked { track, position_ms } => self.update(|s| {
                 if s.epoch == epoch && s.state.current.as_ref().is_some_and(|t| t.id == track) {
                     s.state.position_ms = position_ms;
+                    self.report(|at| Message::Seeked { position_ms, at });
                 }
             }),
             EngineEvent::Finished => self.update(|s| {
                 if s.epoch == epoch {
-                    self.report(|at| Report::Ended {
+                    self.report(|at| Message::Ended {
                         outcome: Outcome::Finished,
                         at,
                     });
-                    stop_session(s);
+                    self.stop_session(s);
                 }
             }),
             EngineEvent::Error { track, message } => self.update(|s| {
@@ -654,7 +686,7 @@ impl Inner {
                 }
                 s.outbox.push(Event::Error(message));
                 if let Some(track) = track {
-                    self.report(|at| Report::Failed { track, at });
+                    self.report(|at| Message::Failed { track, at });
                 }
                 // Если не открылся следующий трек, делать ничего не нужно: движок
                 // сам возьмёт следующий из списка (`LOOKAHEAD`) без паузы.
@@ -664,20 +696,12 @@ impl Inner {
                     if s.skips < MAX_SKIPS.min(s.queue.len()) && s.queue.advance().is_some() {
                         self.start_current(s);
                     } else {
-                        stop_session(s);
+                        self.stop_session(s);
                     }
                 }
             }),
         }
     }
-}
-
-/// Остановка: трек и позиция в очереди сохраняются, чтобы «играть» начало заново.
-fn stop_session(s: &mut Session) {
-    s.state.status = PlaybackStatus::Stopped;
-    s.state.position_ms = 0;
-    s.starting = None;
-    s.decoding = None;
 }
 
 fn engine_track(track: &Track) -> EngineTrack {

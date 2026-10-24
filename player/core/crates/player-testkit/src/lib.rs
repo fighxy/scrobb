@@ -162,6 +162,11 @@ impl Clock for ManualClock {
     fn unix_ms(&self) -> i64 {
         self.unix_ms.load(Ordering::SeqCst)
     }
+
+    /// Время двигает тест: ожидающий поток сверяется с часами каждые 2 мс.
+    fn real_wait(&self, ms: u64) -> Duration {
+        Duration::from_millis(ms.min(2))
+    }
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {

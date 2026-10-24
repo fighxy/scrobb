@@ -150,6 +150,11 @@ pub fn stopped(s: &PlayerState) -> bool {
 }
 
 impl Recorder {
+    /// Все события по порядку.
+    pub fn events(&self) -> Vec<Event> {
+        self.0.lock().unwrap().clone()
+    }
+
     /// Все состояния отправки в Scrobb по порядку.
     pub fn scrobbling(&self) -> Vec<ScrobbleStatus> {
         self.0

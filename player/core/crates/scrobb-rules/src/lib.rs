@@ -162,6 +162,16 @@ impl NowPlayingGate {
         self.clear()
     }
 
+    /// Когда [`poll`](Self::poll) может что-то вернуть: момент сброса после
+    /// долгой паузы. `None` — проверять незачем. Нужно, чтобы ставить таймер.
+    pub fn next_poll_ms(&self) -> Option<u64> {
+        if self.cleared || self.last_sent_ms.is_none() {
+            return None;
+        }
+        self.paused_since_ms
+            .map(|since| since + Self::CLEAR_AFTER_PAUSE_MS)
+    }
+
     /// Периодическая проверка: сброс после долгой паузы.
     pub fn poll(&mut self, now_ms: u64) -> Option<NowPlayingAction> {
         match self.paused_since_ms {
@@ -205,9 +215,12 @@ mod tests {
     fn now_playing_clears_once_after_long_pause() {
         let mut g = NowPlayingGate::default();
         g.on_play(0);
+        assert_eq!(g.next_poll_ms(), None);
         g.on_pause(10_000);
+        assert_eq!(g.next_poll_ms(), Some(310_000));
         assert_eq!(g.poll(309_999), None);
         assert_eq!(g.poll(310_000), Some(NowPlayingAction::Clear));
+        assert_eq!(g.next_poll_ms(), None);
         assert_eq!(g.poll(400_000), None);
         assert_eq!(g.on_play(500_000), Some(NowPlayingAction::Send));
     }
