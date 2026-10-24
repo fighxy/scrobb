@@ -202,10 +202,12 @@ impl RtSource {
         }
     }
 
-    /// Следующая актуальная порция; устаревшие отбрасываются.
-    fn next_chunk(&mut self, flush_before: u32) -> Option<Chunk> {
+    /// Следующая актуальная порция; устаревшие отбрасываются. Поколение
+    /// перечитывается на каждой порции: сброс посреди колбэка обрывает старый
+    /// звук сразу после текущей порции, а не в следующем колбэке.
+    fn next_chunk(&mut self) -> Option<Chunk> {
         while let Ok(chunk) = self.chunks.pop() {
-            if chunk.generation < flush_before {
+            if chunk.generation < self.shared.flush_before.load(Ordering::Acquire) {
                 self.discard(chunk.frames);
                 continue;
             }
@@ -242,7 +244,7 @@ impl PcmSource for RtSource {
 
         'outer: while frame < total_frames {
             if self.remaining == 0 {
-                let Some(chunk) = self.next_chunk(flush_before) else {
+                let Some(chunk) = self.next_chunk() else {
                     if target > 0.0 {
                         self.shared.underruns.fetch_add(1, Ordering::Relaxed);
                     }

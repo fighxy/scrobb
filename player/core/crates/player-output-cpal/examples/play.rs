@@ -2,6 +2,8 @@
 //!
 //! ```sh
 //! cargo run --release -p player-output-cpal --example play -- a.flac b.flac c.mp3
+//! # всё на одной частоте, переходы без пауз даже между 44,1 и 48 кГц:
+//! cargo run --release -p player-output-cpal --example play -- --rate=48000 a.flac b.flac
 //! ```
 
 use std::fs::File;
@@ -11,7 +13,7 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use player_domain::{MediaUri, ReplayGain, TrackId};
-use player_engine::{Engine, EngineConfig, EngineEvent, EngineTrack};
+use player_engine::{Engine, EngineConfig, EngineEvent, EngineTrack, OutputRate};
 use player_output_cpal::CpalOutput;
 use player_ports::{FileAccess, FileEntry, MediaStream, PortError};
 
@@ -31,9 +33,20 @@ impl FileAccess for LocalFiles {
 }
 
 fn main() {
-    let paths: Vec<String> = std::env::args().skip(1).collect();
+    let mut config = EngineConfig::default();
+    let mut paths = Vec::new();
+    for arg in std::env::args().skip(1) {
+        match arg.strip_prefix("--rate=").map(str::parse) {
+            Some(Ok(rate)) => config.output_rate = OutputRate::Fixed(rate),
+            Some(Err(_)) => {
+                eprintln!("неверная частота: {arg}");
+                std::process::exit(2);
+            }
+            None => paths.push(arg),
+        }
+    }
     if paths.is_empty() {
-        eprintln!("использование: play <файл> [<файл>…]");
+        eprintln!("использование: play [--rate=48000] <файл> [<файл>…]");
         std::process::exit(2);
     }
     let track = |i: usize| {
@@ -48,7 +61,7 @@ fn main() {
     let engine = Engine::new(
         Box::new(CpalOutput::new()),
         Arc::new(LocalFiles),
-        EngineConfig::default(),
+        config,
         events,
     );
     engine.play(track(0).unwrap());
@@ -71,6 +84,7 @@ fn main() {
                     (Some(_), t) => engine.set_next(t),
                 }
             }
+            Ok(EngineEvent::Seeked { .. }) => {}
             Ok(EngineEvent::Finished) => break,
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 if let Some(p) = engine.playhead() {

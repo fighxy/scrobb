@@ -6,11 +6,11 @@
 //! управляет им командами. Колбэк устройства не выделяет память: сэмплы
 //! движка идут через заранее выделенный буфер.
 //!
-//! Ограничения первой версии:
-//! - частота вывода равна частоте трека; если устройство её не поддерживает,
-//!   `open` возвращает ошибку (ресемплинг — следующий шаг);
-//! - если у устройства меньше каналов, чем у трека, берутся первые каналы
-//!   (даунмикс — позже); моно размножается на все каналы устройства.
+//! Частоту согласует [`AudioOutput::sample_rate_for`]: частота трека, если устройство
+//! её поддерживает, иначе частота устройства по умолчанию — дальше ресемплирует движок.
+//!
+//! Если у устройства меньше каналов, чем у трека, берутся первые каналы (даунмикс —
+//! позже); моно размножается на все каналы устройства.
 //!
 //! На Linux для сборки нужны заголовки ALSA (`libasound2-dev`).
 
@@ -27,6 +27,7 @@ use player_ports::{AudioOutput, PcmFormat, PcmSource, PortError};
 const SCRATCH_FRAMES: usize = 4096;
 
 enum Control {
+    SampleRate(PcmFormat, Sender<u32>),
     Open(PcmFormat, Box<dyn PcmSource>, Sender<Result<(), PortError>>),
     Start(Sender<Result<(), PortError>>),
     Stop,
@@ -82,6 +83,18 @@ impl Default for CpalOutput {
 }
 
 impl AudioOutput for CpalOutput {
+    fn sample_rate_for(&mut self, wanted: PcmFormat) -> u32 {
+        let (reply, rx) = mpsc::channel();
+        if self
+            .control
+            .send(Control::SampleRate(wanted, reply))
+            .is_err()
+        {
+            return wanted.sample_rate;
+        }
+        rx.recv().unwrap_or(wanted.sample_rate)
+    }
+
     fn open(&mut self, format: PcmFormat, source: Box<dyn PcmSource>) -> Result<(), PortError> {
         self.request(|reply| Control::Open(format, source, reply))
     }
@@ -108,6 +121,9 @@ fn run(rx: Receiver<Control>, errors: Arc<AtomicU64>) {
     let mut stream: Option<cpal::Stream> = None;
     for control in rx {
         match control {
+            Control::SampleRate(wanted, reply) => {
+                let _ = reply.send(sample_rate_for(wanted));
+            }
             Control::Open(format, source, reply) => {
                 stream = None;
                 let opened = build(format, source, errors.clone()).map(|s| stream = Some(s));
@@ -153,7 +169,26 @@ fn build(
     }
 }
 
-/// Конфигурация устройства с частотой трека: сначала то же число каналов, затем `f32`.
+/// Частота трека, если устройство её поддерживает, иначе частота устройства по умолчанию.
+/// Если устройство недоступно — та же частота: ошибку покажет `open`.
+fn sample_rate_for(wanted: PcmFormat) -> u32 {
+    let Some(device) = cpal::default_host().default_output_device() else {
+        return wanted.sample_rate;
+    };
+    let supported = device.supported_output_configs().is_ok_and(|mut ranges| {
+        ranges.any(|r| {
+            r.min_sample_rate() <= wanted.sample_rate && wanted.sample_rate <= r.max_sample_rate()
+        })
+    });
+    if supported {
+        return wanted.sample_rate;
+    }
+    device
+        .default_output_config()
+        .map_or(wanted.sample_rate, |c| c.sample_rate())
+}
+
+/// Конфигурация устройства с нужной частотой: сначала то же число каналов, затем `f32`.
 fn choose_config(
     device: &cpal::Device,
     format: PcmFormat,
@@ -171,11 +206,7 @@ fn choose_config(
             )
         })
         .map(|r| r.with_sample_rate(rate))
-        .ok_or_else(|| {
-            PortError::Other(format!(
-                "устройство не поддерживает {rate} Гц, а ресемплинга пока нет"
-            ))
-        })
+        .ok_or_else(|| PortError::Other(format!("устройство не поддерживает {rate} Гц")))
 }
 
 fn build_typed<T>(

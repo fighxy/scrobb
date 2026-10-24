@@ -17,6 +17,7 @@ use player_ports::{AudioOutput, FileAccess, PcmFormat, PortError};
 
 use crate::decoder::{DecodeError, TrackDecoder};
 use crate::gain::{self, GainConfig};
+use crate::resample::Resampler;
 use crate::rt::{self, Chunk, Shared, Writer};
 
 /// Как часто рабочий поток просыпается, когда буфер полон.
@@ -53,6 +54,13 @@ pub enum EngineEvent {
         /// Трек.
         track: TrackId,
     },
+    /// Перемотка выполнена: всё, что выводится дальше, — с этой позиции.
+    Seeked {
+        /// Трек.
+        track: TrackId,
+        /// Точная позиция, на которую попала перемотка.
+        position_ms: u64,
+    },
     /// Очередь доиграла: следующего трека нет.
     Finished,
     /// Трек не открылся или не декодируется; движок переходит к следующему.
@@ -73,6 +81,19 @@ pub struct Playhead {
     pub position_ms: u64,
 }
 
+/// Частота вывода.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum OutputRate {
+    /// Частота трека, если устройство её поддерживает, иначе — частота устройства
+    /// с ресемплингом. Трек с другой частотой переоткрывает вывод: переход не бесшовный,
+    /// зато звук без пересчёта (для bit-perfect). Для десктопа.
+    #[default]
+    FollowTrack,
+    /// Всегда эта частота: остальное ресемплируется, переходы бесшовные при любых
+    /// частотах треков. Для телефонов (обычно 48 000).
+    Fixed(u32),
+}
+
 /// Настройки движка.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EngineConfig {
@@ -80,6 +101,8 @@ pub struct EngineConfig {
     pub gain: GainConfig,
     /// Сколько декодировать вперёд.
     pub buffer_ms: u32,
+    /// Частота вывода.
+    pub output_rate: OutputRate,
 }
 
 impl Default for EngineConfig {
@@ -87,6 +110,7 @@ impl Default for EngineConfig {
         Self {
             gain: GainConfig::default(),
             buffer_ms: 2_000,
+            output_rate: OutputRate::default(),
         }
     }
 }
@@ -148,8 +172,15 @@ impl Engine {
             next_segment: 0,
             current: None,
             next: None,
+            decoded: Vec::new(),
             pending: Vec::new(),
             pending_offset: 0,
+            pending_header: Chunk {
+                generation: 0,
+                segment: 0,
+                frames: 0,
+                fade_in: false,
+            },
             reopen: None,
             finishing: false,
             last_segment: None,
@@ -245,7 +276,10 @@ impl Drop for Engine {
 
 /// Открытый вывод и сторона записи его буфера.
 struct Stream {
+    /// Формат, в котором работает вывод.
     format: PcmFormat,
+    /// Формат, который у вывода просили (до согласования частоты с устройством).
+    requested: PcmFormat,
     writer: Writer,
 }
 
@@ -256,6 +290,10 @@ struct Active {
     segment: u32,
     gain: f32,
     fade_in: bool,
+    /// Частота, в которой трек попадает в буфер.
+    out_rate: u32,
+    /// Есть, если частота трека отличается от частоты вывода.
+    resampler: Option<Resampler>,
 }
 
 struct Worker {
@@ -271,9 +309,14 @@ struct Worker {
     next_segment: u32,
     current: Option<Active>,
     next: Option<EngineTrack>,
-    /// Декодированные, но ещё не записанные в буфер сэмплы текущего трека.
+    /// Последний декодированный пакет (до ресемплинга).
+    decoded: Vec<f32>,
+    /// Готовые, но ещё не записанные в буфер сэмплы.
     pending: Vec<f32>,
     pending_offset: usize,
+    /// Заголовок для `pending`: сегмент указан явно, потому что хвост ресемплера
+    /// дописывается, когда текущим уже стал следующий трек.
+    pending_header: Chunk,
     /// Следующий трек другого формата: ждёт, пока доиграет буфер.
     reopen: Option<Active>,
     /// Последний трек декодирован; ждём, пока доиграет буфер.
@@ -371,16 +414,77 @@ impl Worker {
         self.next_segment = self.next_segment.wrapping_add(1);
         Ok(Active {
             gain: gain::factor(&track.replay_gain, &self.config.gain),
+            out_rate: decoder.format().sample_rate,
             track,
             decoder,
             segment,
             fade_in: false,
+            resampler: None,
         })
     }
 
+    /// Формат, который просить у вывода для трека, и формат, который вывод даст.
+    fn output_format(&mut self, src: PcmFormat) -> (PcmFormat, PcmFormat) {
+        let wanted = match self.config.output_rate {
+            OutputRate::FollowTrack => src,
+            OutputRate::Fixed(rate) => PcmFormat {
+                sample_rate: rate,
+                ..src
+            },
+        };
+        if let Some(stream) = self.stream.as_ref().filter(|s| s.requested == wanted) {
+            return (wanted, stream.format);
+        }
+        let rate = self.output.sample_rate_for(wanted);
+        (
+            wanted,
+            PcmFormat {
+                sample_rate: rate,
+                ..wanted
+            },
+        )
+    }
+
+    /// Подготовить трек к выводу на частоте `out_rate`: при необходимости — ресемплер.
+    /// Подходящий ресемплер сохраняется вместе с состоянием.
+    fn attach(&self, active: &mut Active, out_rate: u32) -> Result<(), DecodeError> {
+        let src = active.decoder.format();
+        active.out_rate = out_rate;
+        if src.sample_rate == out_rate {
+            active.resampler = None;
+        } else if active
+            .resampler
+            .as_ref()
+            .is_none_or(|r| r.rates() != (src.sample_rate, out_rate))
+        {
+            active.resampler = Some(Resampler::new(src.sample_rate, out_rate, src.channels)?);
+        }
+        Ok(())
+    }
+
+    /// Дописать хвост ресемплера закончившегося трека в его же сегмент.
+    fn flush_resampler(&mut self, carry: Option<(Resampler, u32)>) {
+        let Some((mut resampler, segment)) = carry else {
+            return;
+        };
+        debug_assert!(
+            self.pending_offset >= self.pending.len(),
+            "хвост пишется после готовых данных"
+        );
+        self.pending.clear();
+        self.pending_offset = 0;
+        resampler.flush(&mut self.pending);
+        self.pending_header = Chunk {
+            generation: self.generation,
+            segment,
+            frames: 0,
+            fade_in: false,
+        };
+    }
+
     /// Сделать трек текущим; при другом формате — переоткрыть вывод.
-    fn start(&mut self, active: Active, start_frame: u64, announce: Option<bool>) {
-        let format = active.decoder.format();
+    fn start(&mut self, mut active: Active, start_frame: u64, announce: Option<bool>) {
+        let (requested, format) = self.output_format(active.decoder.format());
         if self.stream.as_ref().map(|s| s.format) != Some(format) {
             if self.stream.take().is_some() {
                 self.output.stop();
@@ -394,13 +498,25 @@ impl Worker {
                 self.error(Some(active.track.id), DecodeError(port_error(e)));
                 return;
             }
-            self.stream = Some(Stream { format, writer });
+            self.stream = Some(Stream {
+                format,
+                requested,
+                writer,
+            });
+        }
+        if let Err(e) = self.attach(&mut active, format.sample_rate) {
+            return self.error(Some(active.track.id), e);
         }
         self.register(&active, start_frame, announce);
         self.current = Some(active);
     }
 
+    /// Запомнить сегмент; `start_frame` — кадр трека в его родной частоте.
     fn register(&self, active: &Active, start_frame: u64, announce: Option<bool>) {
+        let start_frame = active
+            .resampler
+            .as_ref()
+            .map_or(start_frame, |r| r.to_output_frame(start_frame));
         let mut segments = lock(&self.segments);
         if segments.len() == KEEP_SEGMENTS {
             segments.pop_front();
@@ -409,7 +525,7 @@ impl Worker {
             id: active.segment,
             track: active.track.clone(),
             start_frame,
-            sample_rate: active.decoder.format().sample_rate,
+            sample_rate: active.out_rate,
             announce,
         });
     }
@@ -446,11 +562,23 @@ impl Worker {
                 active.segment = rt::segment_id(self.next_segment);
                 self.next_segment = self.next_segment.wrapping_add(1);
                 active.fade_in = true;
-                if self.stream.is_none() {
-                    return self.start(active, frame, None);
+                if let Some(resampler) = &mut active.resampler {
+                    resampler.reset();
                 }
-                self.register(&active, frame, None);
-                self.current = Some(active);
+                let track = active.track.id;
+                let position_ms = frame * 1000 / u64::from(active.decoder.format().sample_rate);
+                let out = self.output_format(active.decoder.format()).1;
+                if self.stream.as_ref().map(|s| s.format) != Some(out) {
+                    self.start(active, frame, None);
+                } else if let Err(e) = self.attach(&mut active, out.sample_rate) {
+                    return self.error(Some(track), e);
+                } else {
+                    self.register(&active, frame, None);
+                    self.current = Some(active);
+                }
+                if self.current.is_some() {
+                    let _ = self.events.send(EngineEvent::Seeked { track, position_ms });
+                }
             }
             Err(e) => self.error(Some(active.track.id), e),
         }
@@ -460,11 +588,11 @@ impl Worker {
         let Some(stream) = &self.stream else {
             return false;
         };
-        let Some(active) = &self.current else {
-            return false;
-        };
-        let channels = usize::from(active.decoder.format().channels.max(1));
+        let channels = usize::from(stream.format.channels.max(1));
         let pending_frames = (self.pending.len() - self.pending_offset) / channels;
+        if pending_frames == 0 && self.current.is_none() {
+            return false;
+        }
         let needed = if pending_frames == 0 {
             MIN_WRITE_FRAMES
         } else {
@@ -476,32 +604,43 @@ impl Worker {
 
     /// Записать готовые сэмплы или декодировать следующий пакет.
     fn produce(&mut self) {
-        let (Some(stream), Some(active)) = (self.stream.as_mut(), self.current.as_mut()) else {
+        let Some(stream) = self.stream.as_mut() else {
             return;
         };
         if self.pending_offset < self.pending.len() {
-            let header = Chunk {
-                generation: self.generation,
-                segment: active.segment,
-                frames: 0,
-                fade_in: active.fade_in,
-            };
             let frames = stream
                 .writer
-                .write(&self.pending[self.pending_offset..], header);
+                .write(&self.pending[self.pending_offset..], self.pending_header);
             if frames > 0 {
-                active.fade_in = false;
+                self.pending_header.fade_in = false;
                 self.pending_offset += frames * usize::from(stream.format.channels);
             }
             return;
         }
         self.pending.clear();
         self.pending_offset = 0;
-        match active.decoder.decode_next(&mut self.pending) {
+        let Some(active) = self.current.as_mut() else {
+            return;
+        };
+        self.decoded.clear();
+        match active.decoder.decode_next(&mut self.decoded) {
             Ok(true) => {
                 if active.gain != 1.0 {
                     let gain = active.gain;
-                    self.pending.iter_mut().for_each(|s| *s *= gain);
+                    self.decoded.iter_mut().for_each(|s| *s *= gain);
+                }
+                match active.resampler.as_mut() {
+                    Some(resampler) => resampler.process(&self.decoded, &mut self.pending),
+                    None => std::mem::swap(&mut self.decoded, &mut self.pending),
+                }
+                if !self.pending.is_empty() {
+                    self.pending_header = Chunk {
+                        generation: self.generation,
+                        segment: active.segment,
+                        frames: 0,
+                        fade_in: active.fade_in,
+                    };
+                    active.fade_in = false;
                 }
             }
             Ok(false) => self.track_ended(),
@@ -515,30 +654,52 @@ impl Worker {
 
     /// Текущий трек декодирован до конца: подхватить следующий.
     fn track_ended(&mut self) {
-        self.current = None;
+        let mut carry = self
+            .current
+            .take()
+            .and_then(|a| a.resampler.map(|r| (r, a.segment)));
         let Some(next) = self.next.take() else {
+            self.flush_resampler(carry);
             self.finishing = true;
             return;
         };
         let _ = self.events.send(EngineEvent::Preloading { track: next.id });
-        match self.open(next) {
-            Ok(active)
-                if self.stream.as_ref().map(|s| s.format) == Some(active.decoder.format()) =>
-            {
-                self.register(&active, 0, Some(true));
-                self.current = Some(active);
-            }
-            Ok(active) => self.reopen = Some(active),
+        let mut active = match self.open(next) {
+            Ok(active) => active,
             Err((track, e)) => {
                 self.error(Some(track), e);
+                self.flush_resampler(carry);
                 self.finishing = true;
+                return;
             }
+        };
+        let src = active.decoder.format();
+        let out = self.output_format(src).1;
+        if self.stream.as_ref().map(|s| s.format) != Some(out) {
+            self.flush_resampler(carry);
+            self.reopen = Some(active);
+            return;
         }
+        // Та же частота трека: продолжить тем же ресемплером — стык как внутри одного файла.
+        if let Some((resampler, _)) =
+            carry.take_if(|(r, _)| r.rates() == (src.sample_rate, out.sample_rate))
+        {
+            active.resampler = Some(resampler);
+        }
+        self.flush_resampler(carry);
+        if let Err(e) = self.attach(&mut active, out.sample_rate) {
+            self.error(Some(active.track.id), e);
+            self.finishing = true;
+            return;
+        }
+        self.register(&active, 0, Some(true));
+        self.current = Some(active);
     }
 
     /// Буфер доиграл: переоткрыть вывод под следующий трек или сообщить о конце.
     fn after_drain(&mut self) {
-        if !self.stream.as_ref().is_none_or(|s| s.writer.is_drained()) {
+        let written = self.pending_offset >= self.pending.len();
+        if !written || !self.stream.as_ref().is_none_or(|s| s.writer.is_drained()) {
             return;
         }
         if let Some(active) = self.reopen.take() {

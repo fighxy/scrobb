@@ -7,15 +7,17 @@
 //! - рабочий поток декодирует вперёд и пишет в кольцевой буфер ([`Engine`]);
 //! - вывод — через порт `AudioOutput`, которому движок отдаёт `PcmSource`;
 //!   в аудиопотоке нет блокировок, выделения памяти и ввода-вывода;
-//! - формат вывода следует за треком: при другой частоте или числе каналов
-//!   следующего трека вывод переоткрывается (ресемплинга пока нет).
+//! - частота вывода — по политике [`OutputRate`]: частота трека, если устройство
+//!   её поддерживает (иначе ресемплинг, [`resample`]), или одна фиксированная частота
+//!   для всех треков; при смене формата вывод переоткрывается.
 //!
 //! Только для нативных целей.
 
 pub mod decoder;
 mod engine;
 pub mod gain;
+pub mod resample;
 mod rt;
 
-pub use engine::{Engine, EngineConfig, EngineEvent, EngineTrack, Playhead};
+pub use engine::{Engine, EngineConfig, EngineEvent, EngineTrack, OutputRate, Playhead};
 pub use gain::{GainConfig, ReplayGainMode};

@@ -9,7 +9,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use player_domain::{MediaUri, ReplayGain, TrackId};
-use player_engine::{Engine, EngineConfig, EngineEvent, EngineTrack, GainConfig, ReplayGainMode};
+use player_engine::{
+    Engine, EngineConfig, EngineEvent, EngineTrack, GainConfig, OutputRate, ReplayGainMode,
+};
 use player_ports::{
     AudioOutput, FileAccess, FileEntry, MediaStream, PcmFormat, PcmSource, PortError,
 };
@@ -61,9 +63,15 @@ impl FileAccess for Fixtures {
 struct ManualOutput {
     source: Arc<Mutex<Option<Box<dyn PcmSource>>>>,
     formats: Arc<Mutex<Vec<PcmFormat>>>,
+    /// Устройство умеет только эту частоту (`None` — любую).
+    only_rate: Option<u32>,
 }
 
 impl AudioOutput for ManualOutput {
+    fn sample_rate_for(&mut self, wanted: PcmFormat) -> u32 {
+        self.only_rate.unwrap_or(wanted.sample_rate)
+    }
+
     fn open(&mut self, format: PcmFormat, source: Box<dyn PcmSource>) -> Result<(), PortError> {
         self.formats.lock().unwrap().push(format);
         *self.source.lock().unwrap() = Some(source);
@@ -118,6 +126,10 @@ fn track(id: u64, file: &str) -> EngineTrack {
 }
 
 fn engine(output: &ManualOutput) -> (Engine, Receiver<EngineEvent>) {
+    engine_with(output, OutputRate::FollowTrack)
+}
+
+fn engine_with(output: &ManualOutput, output_rate: OutputRate) -> (Engine, Receiver<EngineEvent>) {
     let (tx, rx) = mpsc::channel();
     let config = EngineConfig {
         gain: GainConfig {
@@ -125,11 +137,36 @@ fn engine(output: &ManualOutput) -> (Engine, Receiver<EngineEvent>) {
             ..GainConfig::default()
         },
         buffer_ms: 500,
+        output_rate,
     };
     (
         Engine::new(Box::new(output.clone()), Fixtures::load(), config, tx),
         rx,
     )
+}
+
+/// Устройство, которое умеет только 48 кГц.
+fn output_48k() -> ManualOutput {
+    ManualOutput {
+        only_rate: Some(48_000),
+        ..ManualOutput::default()
+    }
+}
+
+/// Исходный сигнал фикстур в момент `t`: 440 Гц слева, 660 Гц справа.
+fn signal(t: f64) -> [f32; 2] {
+    let s = |f: f64| (0.5 * (2.0 * std::f64::consts::PI * f * t).sin()) as f32;
+    [s(440.0), s(660.0)]
+}
+
+/// Наибольшее отклонение кадров `played[from..to]` от сигнала на 48 кГц, начиная с `t0`.
+fn max_error_48k(played: &[f32], t0: f64, from: usize, to: usize) -> f32 {
+    (from..to)
+        .map(|i| {
+            let [l, r] = signal(t0 + i as f64 / 48_000.0);
+            (played[i * 2] - l).abs().max((played[i * 2 + 1] - r).abs())
+        })
+        .fold(0.0, f32::max)
 }
 
 fn wait_event(rx: &Receiver<EngineEvent>, pred: impl Fn(&EngineEvent) -> bool) -> EngineEvent {
@@ -247,25 +284,23 @@ fn mp3_tracks_join_without_gap() {
 #[test]
 fn seek_lands_on_exact_frame() {
     let output = ManualOutput::default();
-    let (engine, _rx) = engine(&output);
+    let (engine, rx) = engine(&output);
     engine.play(track(1, "full.flac"));
     output.collect(2048);
     engine.seek(250);
-    // Дождаться, пока движок отбросит старое и подготовит данные с новой позиции.
-    let deadline = Instant::now() + Duration::from_secs(10);
-    let after = loop {
-        assert!(Instant::now() < deadline, "перемотка не случилась");
-        let chunk = output.pull(1024);
-        if engine.playhead().is_some_and(|p| p.position_ms >= 250) {
-            break chunk;
+    // После события всё, что придёт в вывод, — уже с новой позиции.
+    assert_eq!(
+        wait_event(&rx, |e| matches!(e, EngineEvent::Seeked { .. })),
+        EngineEvent::Seeked {
+            track: TrackId(1),
+            position_ms: 250
         }
-    };
+    );
     // После перемотки 5 мс плавного нарастания (≈221 кадр); дальше — точно эталон.
     let ramp = 221 * 2;
-    let mut after = after;
-    after.extend(output.collect(ramp + 2000));
+    let after = output.collect(ramp + 2000);
     let start = 11_025 * 2;
-    assert!(after[ramp..ramp + 2000] == reference()[start + ramp..start + ramp + 2000]);
+    assert!(after[ramp..] == reference()[start + ramp..start + ramp + 2000]);
 }
 
 #[test]
@@ -362,4 +397,81 @@ fn small_buffer_does_not_stall() {
     engine.play(track(1, "mono8k.flac"));
     let played = play_until(&output, &rx, |e| *e == EngineEvent::Finished);
     assert_eq!(played.len(), 4_000);
+}
+
+#[test]
+fn resamples_when_device_lacks_track_rate() {
+    let output = output_48k();
+    let (engine, rx) = engine(&output);
+    engine.play(track(1, "full.flac"));
+    let played = play_until(&output, &rx, |e| *e == EngineEvent::Finished);
+    assert_eq!(
+        *output.formats.lock().unwrap(),
+        [PcmFormat {
+            sample_rate: 48_000,
+            channels: 2
+        }]
+    );
+    // 0,6 с при 48 кГц.
+    assert_eq!(played.len(), 28_800 * 2);
+    // Высота тона и фаза сохранены; края с переходным процессом фильтра не считаем.
+    let err = max_error_48k(&played, 0.0, 500, 28_300);
+    assert!(err < 1e-3, "отклонение от сигнала {err}");
+}
+
+#[test]
+fn resampled_split_tracks_equal_resampled_whole() {
+    let collect = |tracks: &[&str]| {
+        let output = output_48k();
+        let (engine, rx) = engine(&output);
+        engine.play(track(1, tracks[0]));
+        engine.set_next(tracks.get(1).map(|f| track(2, f)));
+        play_until(&output, &rx, |e| *e == EngineEvent::Finished)
+    };
+    let whole = collect(&["full.flac"]);
+    let split = collect(&["a.flac", "b.flac"]);
+    // Один непрерывный ресемплер на оба трека: стык неотличим от середины файла.
+    assert!(split == whole);
+}
+
+#[test]
+fn fixed_rate_joins_tracks_of_different_rates_without_gap() {
+    let output = ManualOutput::default();
+    let (engine, rx) = engine_with(&output, OutputRate::Fixed(48_000));
+    engine.play(track(1, "a.flac")); // 44,1 кГц
+    engine.set_next(Some(track(2, "c48k.flac"))); // 48 кГц
+    let events = Mutex::new(Vec::new());
+    let played = play_until(&output, &rx, |e| {
+        events.lock().unwrap().push(e.clone());
+        *e == EngineEvent::Finished
+    });
+    // Вывод не переоткрывался, переход бесшовный.
+    assert_eq!(
+        *output.formats.lock().unwrap(),
+        [PcmFormat {
+            sample_rate: 48_000,
+            channels: 2
+        }]
+    );
+    let started = EngineEvent::TrackStarted {
+        track: TrackId(2),
+        gapless: true,
+    };
+    assert!(events.lock().unwrap().contains(&started));
+    // ceil(11113 × 160 / 147) = 12096 кадров первого трека + 0,2 с второго.
+    assert_eq!(played.len(), (12_096 + 9_600) * 2);
+}
+
+#[test]
+fn seek_with_resampling_lands_on_time() {
+    let output = output_48k();
+    let (engine, rx) = engine(&output);
+    engine.play(track(1, "full.flac"));
+    output.collect(2048);
+    engine.seek(250);
+    wait_event(&rx, |e| matches!(e, EngineEvent::Seeked { .. }));
+    let after = output.collect(4000 * 2);
+    // Нарастание громкости (5 мс) и переходный процесс фильтра пропускаем.
+    let err = max_error_48k(&after, 0.25, 1000, 4000);
+    assert!(err < 1e-3, "отклонение после перемотки {err}");
 }

@@ -53,6 +53,11 @@ pub trait AudioOutput: Send {
     fn start(&mut self) -> Result<(), PortError>;
     /// Остановить поток.
     fn stop(&mut self);
+    /// Какую частоту устройство даст, если попросить `wanted`: саму `wanted`, если
+    /// поддерживает, иначе свою. Остальное движок ресемплирует. По умолчанию — любую.
+    fn sample_rate_for(&mut self, wanted: PcmFormat) -> u32 {
+        wanted.sample_rate
+    }
     /// Поддерживает ли устройство вывод без изменений (bit-perfect).
     fn bit_perfect(&self) -> bool {
         false

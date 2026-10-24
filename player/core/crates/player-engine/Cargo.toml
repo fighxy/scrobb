@@ -10,6 +10,7 @@ publish.workspace = true
 player-domain.workspace = true
 player-ports.workspace = true
 rtrb = "0.4.0"
+rubato = "4.0.0"
 symphonia = { version = "0.6.1", default-features = false, features = ["all", "opt-simd"] }
 
 [lints]
