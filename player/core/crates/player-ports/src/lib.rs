@@ -37,7 +37,8 @@ pub struct PcmFormat {
 
 /// Источник PCM для аудиопотока.
 pub trait PcmSource: Send {
-    /// Заполнить `out` чередующимися сэмплами и вернуть их число.
+    /// Заполнить весь `out` чередующимися сэмплами; где данных нет — тишиной.
+    /// Возвращает, сколько сэмплов в начале `out` взято из потока (остальное — тишина).
     /// Вызывается из аудиопотока: без блокировок, аллокаций и ввода-вывода.
     fn fill(&mut self, out: &mut [f32]) -> usize;
 }
@@ -45,6 +46,8 @@ pub trait PcmSource: Send {
 /// Вывод звука: AAudio, CoreAudio, WASAPI, ALSA/PipeWire.
 pub trait AudioOutput: Send {
     /// Открыть устройство; адаптер сам тянет сэмплы из `source`.
+    /// Повторный вызов после [`stop`](Self::stop) переоткрывает вывод в новом формате
+    /// (например, у следующего трека другая частота).
     fn open(&mut self, format: PcmFormat, source: Box<dyn PcmSource>) -> Result<(), PortError>;
     /// Запустить поток.
     fn start(&mut self) -> Result<(), PortError>;
@@ -80,8 +83,8 @@ pub struct FileEntry {
 }
 
 /// Поток байтов файла.
-pub trait MediaStream: std::io::Read + std::io::Seek + Send {}
-impl<T: std::io::Read + std::io::Seek + Send> MediaStream for T {}
+pub trait MediaStream: std::io::Read + std::io::Seek + Send + Sync {}
+impl<T: std::io::Read + std::io::Seek + Send + Sync> MediaStream for T {}
 
 /// Доступ к файлам: ФС, MediaStore и SAF, песочница и закладки на Apple, порталы Flatpak.
 pub trait FileAccess: Send + Sync {

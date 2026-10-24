@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Проверки ядра: формат, линтер, тесты и сборка веб-совместимых крейтов под wasm32.
 # То же самое будет запускать CI (docs/ci-cd.md: тесты ядра — на Linux на каждом PR).
+# На Linux для адаптера вывода (cpal) нужны заголовки ALSA: apt install libasound2-dev.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 

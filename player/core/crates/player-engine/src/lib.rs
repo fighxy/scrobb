@@ -1,45 +1,21 @@
-//! Звуковой движок (заготовка): декодирование, ресемплинг, ReplayGain,
-//! эквалайзер, кроссфейд, gapless и кольцевой буфер для аудиопотока.
+//! Звуковой движок: декодирование, ReplayGain, gapless, плавная пауза,
+//! точная перемотка и аудиопоток без блокировок.
 //!
-//! Устройство и ограничения — `docs/player-architecture.md` §3.2 и §3.4:
-//! - декодер — Symphonia, недостающие кодеки — через порт `PlatformDecoder`;
-//! - вывод — через порт `AudioOutput`, движок отдаёт ему `PcmSource`;
-//! - в аудиопотоке — ни блокировок, ни аллокаций, ни ввода-вывода.
+//! Устройство — `docs/player-architecture.md` §3.2 и §3.4:
+//! - декодер — Symphonia ([`decoder`]); задержку и паддинг кодера она
+//!   обрезает сама, поэтому переход между треками — без щелчков и пауз;
+//! - рабочий поток декодирует вперёд и пишет в кольцевой буфер ([`Engine`]);
+//! - вывод — через порт `AudioOutput`, которому движок отдаёт `PcmSource`;
+//!   в аудиопотоке нет блокировок, выделения памяти и ввода-вывода;
+//! - формат вывода следует за треком: при другой частоте или числе каналов
+//!   следующего трека вывод переоткрывается (ресемплинга пока нет).
 //!
-//! Только для нативных целей: под wasm не собирается по смыслу.
+//! Только для нативных целей.
 
-/// Режим ReplayGain.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum ReplayGainMode {
-    /// Выключен.
-    Off,
-    /// По трекам.
-    #[default]
-    Track,
-    /// По альбомам.
-    Album,
-}
+pub mod decoder;
+mod engine;
+pub mod gain;
+mod rt;
 
-/// Настройки движка.
-#[derive(Debug, Clone, PartialEq)]
-pub struct EngineConfig {
-    /// ReplayGain.
-    pub replay_gain: ReplayGainMode,
-    /// Предусиление, дБ.
-    pub preamp_db: f32,
-    /// Кроссфейд; 0 — gapless без наложения.
-    pub crossfade_ms: u32,
-    /// Сколько декодировать вперёд.
-    pub prebuffer_ms: u32,
-}
-
-impl Default for EngineConfig {
-    fn default() -> Self {
-        Self {
-            replay_gain: ReplayGainMode::Track,
-            preamp_db: 0.0,
-            crossfade_ms: 0,
-            prebuffer_ms: 3_000,
-        }
-    }
-}
+pub use engine::{Engine, EngineConfig, EngineEvent, EngineTrack, Playhead};
+pub use gain::{GainConfig, ReplayGainMode};

@@ -1,0 +1,18 @@
+[package]
+name = "player-output-cpal"
+description = "Адаптер порта AudioOutput на cpal: WASAPI, CoreAudio, AAudio, ALSA/PipeWire"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+cpal = "0.18.2"
+player-ports.workspace = true
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+player-domain.workspace = true
+player-engine.workspace = true

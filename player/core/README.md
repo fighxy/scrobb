@@ -15,7 +15,8 @@ player/core/                 Cargo workspace
     player-playback/         очередь, повтор                                    │ собирается под wasm32
     player-history/          история и превращение прослушиваний в скробблы   ─┘
     player-ports/            порты: звук, медиасессия, файлы, секреты, сеть, часы ─┐
-    player-engine/           звуковой движок (заготовка)                          │ нативный
+    player-engine/           звуковой движок: gapless, ReplayGain, перемотка      │ нативный
+    player-output-cpal/      вывод звука через cpal (адаптер порта AudioOutput)   │
     player-library/          библиотека, SQLite, поиск (заготовка)                │ ярус плеера
     player-metadata/         MusicBrainz, AcoustID, кодировки (заготовка)         │
     player-plugins/          хост WASM-плагинов (заготовка)                       │
@@ -33,7 +34,7 @@ player/core/                 Cargo workspace
 |---|---|---|---|
 | **Scrobb** | `scrobb-api`, `scrobb-rules`, `scrobb-client`, `scrobb-sync` | Плеер; десктоп-клиент Scrobb на Tauri (тоже Rust, [architecture.md](../../docs/architecture.md) §18.12); веб-приложение и расширение через `bindings/wasm` | Без ввода-вывода, системного времени и потоков; собирается под `wasm32-unknown-unknown`; не зависит от `player-*` |
 | **Плеер, общий** | `player-domain`, `player-playback`, `player-history` | Ядро плеера; при желании — веб (например, веб-плеер на сайте) | Те же, что у яруса Scrobb |
-| **Плеер, нативный** | `player-ports`, `player-engine`, `player-library`, `player-metadata`, `player-plugins`, `player-core` | Только плеер | Всё платформенное — только через порты |
+| **Плеер, нативный** | `player-ports`, `player-engine`, `player-output-cpal`, `player-library`, `player-metadata`, `player-plugins`, `player-core` | Только плеер | Всё платформенное — только через порты |
 | **Привязки** | `bindings/ffi`, `bindings/wasm` | Оболочки на SwiftUI и Compose; веб и расширение | Наружу — только фасад `player-core` (ffi) и ярус Scrobb (wasm) |
 
 ## Правила зависимостей
@@ -64,10 +65,40 @@ scripts/check.sh
 
 Нужен Rust 1.85+ (edition 2024). Для проверки под wasm: `rustup target add wasm32-unknown-unknown`; без этой цели шаг пропускается с предупреждением.
 
+## Звуковой движок
+
+`player-engine` — первая рабочая часть ядра.
+
+- **Декодирование** — Symphonia 0.6: MP3, AAC, FLAC, ALAC, Vorbis, WAV, AIFF, ADPCM в контейнерах MP4, MKV, Ogg, CAF. Opus в Symphonia пока нет.
+- **Gapless:** задержку и паддинг кодера Symphonia обрезает сама — для FLAC, MP3 с заголовком LAME, Vorbis, ALAC, WAV. Для AAC в MP4 обрезки пока нет (ограничение Symphonia).
+- **Рабочий поток** декодирует вперёд на `buffer_ms` и заранее открывает следующий трек. Если у следующего трека другая частота или число каналов, вывод переоткрывается после того, как доиграет буфер; переход в этом случае не бесшовный.
+- **Аудиопоток** читает два lock-free кольцевых буфера (rtrb) и атомики: без блокировок, выделения памяти и ввода-вывода. Перемотка и смена трека отбрасывают старые данные по номеру поколения.
+- **Пауза, продолжение и громкость** меняются плавно, за 5 мс; после перемотки — плавное нарастание. На паузе буфер не тратится.
+- **ReplayGain** — по треку или альбому, с предусилением и защитой от клиппинга по пику.
+- **События:** `TrackStarted` (с флагом `gapless`), `Preloading` («пора передать следующий трек»), `Finished`, `Error`. Позиция — `Engine::playhead()`.
+
+Что проверяют тесты (`crates/player-engine/tests`, фикстуры генерирует `fixtures/generate.sh` через ffmpeg):
+- два куска FLAC, разрезанные посреди пакета, склеиваются в исходный сигнал сэмпл в сэмпл;
+- два куска MP3 дают ровно исходное число кадров и совпадают с декодированием ffmpeg;
+- перемотка попадает в точный кадр;
+- на паузе ни один кадр не теряется и не повторяется;
+- трек с другой частотой переоткрывает вывод;
+- следующий трек, переданный с опозданием, подхватывается без паузы;
+- маленький буфер не вешает движок.
+
+Послушать на своём компьютере (вывод — устройство по умолчанию, на Linux нужен `libasound2-dev`):
+
+```sh
+cd player/core
+cargo run --release -p player-output-cpal --example play -- a.flac b.flac c.mp3
+```
+
+Чего пока нет: ресемплинга (если устройство не поддерживает частоту трека, вывод не откроется), кроссфейда, даунмикса многоканального звука, эквалайзера, bit-perfect и монопольного режима, Opus, а также связи движка с фасадом `player-core`.
+
 ## Что дальше
 
 По порядку из [player-architecture.md](../../docs/player-architecture.md) §9:
-1. Спайк движка: Symphonia + cpal в `player-engine`, фоновое воспроизведение в минимальных оболочках на Android и iOS.
+1. Движок: ресемплинг (rubato) для устройств с фиксированной частотой — Windows в общем режиме, мобильные; подключение к фасаду `player-core`; затем спайк фонового воспроизведения в минимальных оболочках на Android и iOS.
 2. UniFFI в `bindings/ffi`: Swift и Kotlin, callback-интерфейсы для `Observer` и портов.
 3. Библиотека: lofty, SQLite + FTS5, окна списков.
 4. `bindings/wasm`: wasm-bindgen и npm-пакет для веба и расширения.
@@ -75,3 +106,5 @@ scripts/check.sh
 ## Лицензия
 
 Не выбрана: это открытый вопрос о лицензии своих клиентов ([architecture.md](../../docs/architecture.md) §16, п. 41). Пока везде `publish = false`.
+
+Лицензии зависимостей движка: Symphonia — MPL-2.0 (копилефт на уровне файлов: изменения в её файлах нужно публиковать, наш код — нет), rtrb — MIT/Apache-2.0, cpal — Apache-2.0.
