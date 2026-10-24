@@ -68,7 +68,7 @@ fn main() {
     engine.set_next(track(1));
 
     loop {
-        match rx.recv_timeout(Duration::from_millis(250)) {
+        match rx.recv_timeout(Duration::from_millis(250)).map(|m| m.event) {
             Ok(EngineEvent::TrackStarted { track: id, gapless }) => {
                 let how = if gapless { " (без паузы)" } else { "" };
                 println!("\n▶ {}{how}", paths[id.0 as usize]);
@@ -79,7 +79,9 @@ fn main() {
                 // Битый трек пропускаем: если ничего не звучит — играем следующий.
                 let following = id.and_then(|id| track(id.0 as usize + 1));
                 match (engine.playhead(), following) {
-                    (None, Some(t)) => engine.play(t),
+                    (None, Some(t)) => {
+                        engine.play(t);
+                    }
                     (None, None) => break,
                     (Some(_), t) => engine.set_next(t),
                 }

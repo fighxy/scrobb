@@ -7,4 +7,4 @@
 //! [`player_core::Observer`] и порты становятся callback-интерфейсами,
 //! которые реализуют оболочки.
 
-pub use player_core::{Capabilities, Command, Core, CoreError, Event, Observer, Ports};
+pub use player_core::{Capabilities, Command, Core, CoreConfig, CoreError, Event, Observer, Ports};

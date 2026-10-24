@@ -542,6 +542,7 @@ dependencies = [
  "player-playback",
  "player-plugins",
  "player-ports",
+ "player-testkit",
  "scrobb-api",
  "scrobb-client",
  "scrobb-rules",
@@ -558,6 +559,7 @@ version = "0.0.0"
 dependencies = [
  "player-domain",
  "player-ports",
+ "player-testkit",
  "rtrb",
  "rubato",
  "symphonia",
@@ -621,6 +623,14 @@ version = "0.0.0"
 dependencies = [
  "player-domain",
  "scrobb-client",
+]
+
+[[package]]
+name = "player-testkit"
+version = "0.0.0"
+dependencies = [
+ "player-domain",
+ "player-ports",
 ]
 
 [[package]]

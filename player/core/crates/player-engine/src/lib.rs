@@ -19,5 +19,7 @@ pub mod gain;
 pub mod resample;
 mod rt;
 
-pub use engine::{Engine, EngineConfig, EngineEvent, EngineTrack, OutputRate, Playhead};
+pub use engine::{
+    Engine, EngineConfig, EngineEvent, EngineMessage, EngineTrack, OutputRate, Playhead,
+};
 pub use gain::{GainConfig, ReplayGainMode};

@@ -6,7 +6,7 @@
 //! переоткрывает вывод, если у следующего трека другой формат.
 
 use std::collections::VecDeque;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
@@ -48,7 +48,8 @@ pub enum EngineEvent {
         /// Переход без паузы.
         gapless: bool,
     },
-    /// Движок начал готовить `track` из [`Engine::set_next`]: пора передать следующий.
+    /// Движок взял `track` из списка следующих ([`Engine::set_upcoming`]) и начал
+    /// его готовить: пора передать треки, которые идут за ним.
     /// Приходит раньше, чем трек зазвучит, — на `buffer_ms`.
     Preloading {
         /// Трек.
@@ -70,6 +71,18 @@ pub enum EngineEvent {
         /// Описание.
         message: String,
     },
+}
+
+/// Событие движка с эпохой. Эпоха растёт при каждом [`Engine::play`] и
+/// [`Engine::stop`]: события прошлых эпох относятся к тому, что уже отменено
+/// (например, трек начался, а пользователь тут же нажал «назад»), и их стоит
+/// отбрасывать.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EngineMessage {
+    /// Эпоха, в которой возникло событие.
+    pub epoch: u64,
+    /// Событие.
+    pub event: EngineEvent,
 }
 
 /// Что звучит сейчас.
@@ -116,10 +129,18 @@ impl Default for EngineConfig {
 }
 
 enum Command {
-    Play(EngineTrack),
-    SetNext(Option<EngineTrack>),
+    Play {
+        track: EngineTrack,
+        epoch: u64,
+    },
+    SetUpcoming {
+        after: Option<TrackId>,
+        tracks: Vec<EngineTrack>,
+    },
     Seek(u64),
-    Stop,
+    Stop {
+        epoch: u64,
+    },
     SetGain(GainConfig),
     Shutdown,
 }
@@ -130,6 +151,8 @@ struct Segment {
     track: EngineTrack,
     start_frame: u64,
     sample_rate: u32,
+    /// Эпоха, в которой сегмент записан: с ней и сообщается о начале трека.
+    epoch: u64,
     /// `Some(gapless)` — сообщить о начале трека, когда сегмент зазвучит.
     announce: Option<bool>,
 }
@@ -143,6 +166,7 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 /// Звуковой движок.
 pub struct Engine {
     commands: Sender<Command>,
+    epoch: AtomicU64,
     shared: Arc<Shared>,
     segments: Segments,
     worker: Option<JoinHandle<()>>,
@@ -154,7 +178,7 @@ impl Engine {
         output: Box<dyn AudioOutput>,
         files: Arc<dyn FileAccess>,
         config: EngineConfig,
-        events: Sender<EngineEvent>,
+        events: Sender<EngineMessage>,
     ) -> Self {
         let (commands, rx) = mpsc::channel();
         let shared = Arc::new(Shared::new());
@@ -162,6 +186,7 @@ impl Engine {
         let worker = Worker {
             commands: rx,
             events,
+            epoch: 0,
             files,
             config,
             output,
@@ -171,7 +196,8 @@ impl Engine {
             generation: 0,
             next_segment: 0,
             current: None,
-            next: None,
+            upcoming: VecDeque::new(),
+            decoding: None,
             decoded: Vec::new(),
             pending: Vec::new(),
             pending_offset: 0,
@@ -191,21 +217,40 @@ impl Engine {
             .expect("поток движка запускается");
         Self {
             commands,
+            epoch: AtomicU64::new(0),
             shared,
             segments,
             worker: Some(worker),
         }
     }
 
-    /// Играть трек с начала; следующий трек сбрасывается.
-    pub fn play(&self, track: EngineTrack) {
-        self.send(Command::Play(track));
+    /// Играть трек с начала; следующие треки сбрасываются. Возвращает новую эпоху.
+    pub fn play(&self, track: EngineTrack) -> u64 {
+        let epoch = self.epoch.fetch_add(1, Ordering::Relaxed) + 1;
+        self.send(Command::Play { track, epoch });
+        epoch
     }
 
-    /// Следующий трек для перехода без паузы. Если текущий уже декодирован,
-    /// но ещё звучит, следующий всё равно подхватывается без паузы.
+    /// Треки, которые идут за `after`, по порядку, для переходов без паузы.
+    ///
+    /// Список применяется, только если движок сейчас готовит именно `after`:
+    /// ответ, опоздавший к уже ушедшему вперёд движку, отбрасывается. Если трек
+    /// из списка не открылся, движок сразу берёт следующий — без ожидания.
+    /// Если текущий трек уже декодирован, но ещё звучит, список подхватывается
+    /// без паузы.
+    pub fn set_upcoming(&self, after: TrackId, tracks: Vec<EngineTrack>) {
+        self.send(Command::SetUpcoming {
+            after: Some(after),
+            tracks,
+        });
+    }
+
+    /// Один следующий трек без привязки к текущему (для простых сценариев).
     pub fn set_next(&self, track: Option<EngineTrack>) {
-        self.send(Command::SetNext(track));
+        self.send(Command::SetUpcoming {
+            after: None,
+            tracks: track.into_iter().collect(),
+        });
     }
 
     /// Пауза с плавным затуханием.
@@ -228,9 +273,11 @@ impl Engine {
         self.send(Command::Seek(position_ms));
     }
 
-    /// Остановить и очистить очередь.
-    pub fn stop(&self) {
-        self.send(Command::Stop);
+    /// Остановить и очистить очередь. Возвращает новую эпоху.
+    pub fn stop(&self) -> u64 {
+        let epoch = self.epoch.fetch_add(1, Ordering::Relaxed) + 1;
+        self.send(Command::Stop { epoch });
+        epoch
     }
 
     /// Громкость 0.0–1.0 (линейный множитель амплитуды).
@@ -298,7 +345,9 @@ struct Active {
 
 struct Worker {
     commands: Receiver<Command>,
-    events: Sender<EngineEvent>,
+    events: Sender<EngineMessage>,
+    /// Эпоха последней `play` или `stop`.
+    epoch: u64,
     files: Arc<dyn FileAccess>,
     config: EngineConfig,
     output: Box<dyn AudioOutput>,
@@ -308,7 +357,11 @@ struct Worker {
     generation: u32,
     next_segment: u32,
     current: Option<Active>,
-    next: Option<EngineTrack>,
+    /// Следующие треки по порядку.
+    upcoming: VecDeque<EngineTrack>,
+    /// Трек, который движок готовит сейчас (или доготовил последним); к нему
+    /// привязан список следующих.
+    decoding: Option<TrackId>,
     /// Последний декодированный пакет (до ресемплинга).
     decoded: Vec<f32>,
     /// Готовые, но ещё не записанные в буфер сэмплы.
@@ -355,26 +408,33 @@ impl Worker {
 
     fn handle(&mut self, command: Command) {
         match command {
-            Command::Play(track) => {
+            Command::Play { track, epoch } => {
+                self.epoch = epoch;
                 self.flush();
-                self.next = None;
+                self.upcoming.clear();
+                self.decoding = Some(track.id);
                 self.shared.paused.store(false, Ordering::Relaxed);
                 match self.open(track) {
                     Ok(active) => self.start(active, 0, Some(false)),
                     Err((track, e)) => self.error(Some(track), e),
                 }
             }
-            Command::SetNext(track) => {
-                self.next = track;
-                if self.finishing && self.next.is_some() {
+            Command::SetUpcoming { after, tracks } => {
+                if after.is_some() && after != self.decoding {
+                    return; // список устарел: движок уже ушёл дальше
+                }
+                self.upcoming = tracks.into();
+                if self.finishing && !self.upcoming.is_empty() {
                     self.finishing = false;
                     self.track_ended();
                 }
             }
             Command::Seek(position_ms) => self.seek(position_ms),
-            Command::Stop => {
+            Command::Stop { epoch } => {
+                self.epoch = epoch;
                 self.flush();
-                self.next = None;
+                self.upcoming.clear();
+                self.decoding = None;
                 lock(&self.segments).clear();
                 self.shared.clear_playhead();
                 self.last_segment = None;
@@ -526,6 +586,7 @@ impl Worker {
             track: active.track.clone(),
             start_frame,
             sample_rate: active.out_rate,
+            epoch: self.epoch,
             announce,
         });
     }
@@ -545,11 +606,14 @@ impl Worker {
         let current = self.current.take();
         let ahead = match &current {
             Some(a) if a.track != track => Some(a.track.clone()),
-            _ => self.reopen.take().map(|a| a.track).or(self.next.take()),
+            _ => self.reopen.take().map(|a| a.track),
         };
         let reusable = current.filter(|a| a.track == track);
         self.flush();
-        self.next = ahead;
+        self.decoding = Some(track.id);
+        if let Some(ahead) = ahead {
+            self.upcoming.push_front(ahead);
+        }
         let mut active = match reusable {
             Some(a) => a,
             None => match self.open(track) {
@@ -577,7 +641,7 @@ impl Worker {
                     self.current = Some(active);
                 }
                 if self.current.is_some() {
-                    let _ = self.events.send(EngineEvent::Seeked { track, position_ms });
+                    self.emit(EngineEvent::Seeked { track, position_ms });
                 }
             }
             Err(e) => self.error(Some(active.track.id), e),
@@ -658,19 +722,18 @@ impl Worker {
             .current
             .take()
             .and_then(|a| a.resampler.map(|r| (r, a.segment)));
-        let Some(next) = self.next.take() else {
-            self.flush_resampler(carry);
-            self.finishing = true;
-            return;
-        };
-        let _ = self.events.send(EngineEvent::Preloading { track: next.id });
-        let mut active = match self.open(next) {
-            Ok(active) => active,
-            Err((track, e)) => {
-                self.error(Some(track), e);
+        // Трек, который не открылся, пропускаем и сразу берём следующий из списка.
+        let mut active = loop {
+            let Some(next) = self.upcoming.pop_front() else {
                 self.flush_resampler(carry);
                 self.finishing = true;
                 return;
+            };
+            self.decoding = Some(next.id);
+            self.emit(EngineEvent::Preloading { track: next.id });
+            match self.open(next) {
+                Ok(active) => break active,
+                Err((track, e)) => self.error(Some(track), e),
             }
         };
         let src = active.decoder.format();
@@ -706,7 +769,7 @@ impl Worker {
             self.start(active, 0, Some(false));
         } else if self.finishing {
             self.finishing = false;
-            let _ = self.events.send(EngineEvent::Finished);
+            self.emit(EngineEvent::Finished);
         }
     }
 
@@ -722,16 +785,22 @@ impl Worker {
         let started = lock(&self.segments)
             .iter()
             .find(|s| s.id == segment)
-            .and_then(|s| s.announce.map(|gapless| (s.track.id, gapless)));
-        if let Some((track, gapless)) = started {
-            let _ = self
-                .events
-                .send(EngineEvent::TrackStarted { track, gapless });
+            .and_then(|s| s.announce.map(|gapless| (s.track.id, gapless, s.epoch)));
+        if let Some((track, gapless, epoch)) = started {
+            let event = EngineEvent::TrackStarted { track, gapless };
+            let _ = self.events.send(EngineMessage { epoch, event });
         }
     }
 
+    fn emit(&self, event: EngineEvent) {
+        let _ = self.events.send(EngineMessage {
+            epoch: self.epoch,
+            event,
+        });
+    }
+
     fn error(&self, track: Option<TrackId>, e: DecodeError) {
-        let _ = self.events.send(EngineEvent::Error {
+        self.emit(EngineEvent::Error {
             track,
             message: e.0,
         });

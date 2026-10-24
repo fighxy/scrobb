@@ -1,121 +1,18 @@
-//! Движок целиком: декодирование файлов из `fixtures/`, кольцевой буфер и
-//! аудиопоток. Вместо звуковой карты — [`ManualOutput`]: тест сам забирает
+//! Движок целиком: декодирование тестовых файлов, кольцевой буфер и аудиопоток.
+//! Вместо звуковой карты — `ManualOutput` из `player-testkit`: тест сам забирает
 //! сэмплы, как это делал бы колбэк устройства.
 
-use std::collections::HashMap;
-use std::io::Cursor;
+use std::sync::Mutex;
 use std::sync::mpsc::{self, Receiver};
-use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use player_domain::{MediaUri, ReplayGain, TrackId};
 use player_engine::{
-    Engine, EngineConfig, EngineEvent, EngineTrack, GainConfig, OutputRate, ReplayGainMode,
+    Engine, EngineConfig, EngineEvent, EngineMessage, EngineTrack, GainConfig, OutputRate,
+    ReplayGainMode,
 };
-use player_ports::{
-    AudioOutput, FileAccess, FileEntry, MediaStream, PcmFormat, PcmSource, PortError,
-};
-
-const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures");
-/// Кадров в `full.wav`: 0,6 с при 44,1 кГц.
-const FULL_FRAMES: usize = 26_460;
-
-/// Файлы из `fixtures/` в памяти.
-struct Fixtures(HashMap<String, Vec<u8>>);
-
-impl Fixtures {
-    fn load() -> Arc<Self> {
-        let files = [
-            "a.flac",
-            "b.flac",
-            "a.mp3",
-            "b.mp3",
-            "full.flac",
-            "c48k.flac",
-            "mono8k.flac",
-        ]
-        .into_iter()
-        .map(|name| {
-            let bytes = std::fs::read(format!("{FIXTURES}/{name}")).expect(name);
-            (name.to_owned(), bytes)
-        })
-        .collect();
-        Arc::new(Self(files))
-    }
-}
-
-impl FileAccess for Fixtures {
-    fn list(&self, _: &MediaUri) -> Result<Vec<FileEntry>, PortError> {
-        Err(PortError::Unsupported)
-    }
-
-    fn open(&self, uri: &MediaUri) -> Result<Box<dyn MediaStream>, PortError> {
-        let bytes = self
-            .0
-            .get(&uri.0)
-            .ok_or(PortError::Other(format!("нет файла {}", uri.0)))?;
-        Ok(Box::new(Cursor::new(bytes.clone())))
-    }
-}
-
-/// Вывод, из которого тест сам тянет сэмплы.
-#[derive(Clone, Default)]
-struct ManualOutput {
-    source: Arc<Mutex<Option<Box<dyn PcmSource>>>>,
-    formats: Arc<Mutex<Vec<PcmFormat>>>,
-    /// Устройство умеет только эту частоту (`None` — любую).
-    only_rate: Option<u32>,
-}
-
-impl AudioOutput for ManualOutput {
-    fn sample_rate_for(&mut self, wanted: PcmFormat) -> u32 {
-        self.only_rate.unwrap_or(wanted.sample_rate)
-    }
-
-    fn open(&mut self, format: PcmFormat, source: Box<dyn PcmSource>) -> Result<(), PortError> {
-        self.formats.lock().unwrap().push(format);
-        *self.source.lock().unwrap() = Some(source);
-        Ok(())
-    }
-
-    fn start(&mut self) -> Result<(), PortError> {
-        Ok(())
-    }
-
-    fn stop(&mut self) {}
-}
-
-impl ManualOutput {
-    /// Один «колбэк устройства» на `samples` сэмплов: вернуть то, что пришло из потока.
-    fn pull(&self, samples: usize) -> Vec<f32> {
-        let mut out = vec![0.0; samples];
-        let taken = match self.source.lock().unwrap().as_mut() {
-            Some(source) => source.fill(&mut out),
-            None => 0,
-        };
-        out.truncate(taken);
-        out
-    }
-
-    /// Тянуть, пока не наберётся `samples` сэмплов (данные приходят из рабочего потока).
-    fn collect(&self, samples: usize) -> Vec<f32> {
-        let deadline = Instant::now() + Duration::from_secs(10);
-        let mut got = Vec::with_capacity(samples);
-        while got.len() < samples {
-            assert!(
-                Instant::now() < deadline,
-                "собрано {} из {samples}",
-                got.len()
-            );
-            let chunk = self.pull((samples - got.len()).min(1024));
-            if chunk.is_empty() {
-                std::thread::sleep(Duration::from_millis(1));
-            }
-            got.extend(chunk);
-        }
-        got
-    }
-}
+use player_ports::PcmFormat;
+use player_testkit::{FULL_FRAMES, Fixtures, ManualOutput, read_wav};
 
 fn track(id: u64, file: &str) -> EngineTrack {
     EngineTrack {
@@ -125,11 +22,14 @@ fn track(id: u64, file: &str) -> EngineTrack {
     }
 }
 
-fn engine(output: &ManualOutput) -> (Engine, Receiver<EngineEvent>) {
+fn engine(output: &ManualOutput) -> (Engine, Receiver<EngineMessage>) {
     engine_with(output, OutputRate::FollowTrack)
 }
 
-fn engine_with(output: &ManualOutput, output_rate: OutputRate) -> (Engine, Receiver<EngineEvent>) {
+fn engine_with(
+    output: &ManualOutput,
+    output_rate: OutputRate,
+) -> (Engine, Receiver<EngineMessage>) {
     let (tx, rx) = mpsc::channel();
     let config = EngineConfig {
         gain: GainConfig {
@@ -140,17 +40,13 @@ fn engine_with(output: &ManualOutput, output_rate: OutputRate) -> (Engine, Recei
         output_rate,
     };
     (
-        Engine::new(Box::new(output.clone()), Fixtures::load(), config, tx),
+        Engine::new(Box::new(output.clone()), Fixtures::shared(), config, tx),
         rx,
     )
 }
 
-/// Устройство, которое умеет только 48 кГц.
 fn output_48k() -> ManualOutput {
-    ManualOutput {
-        only_rate: Some(48_000),
-        ..ManualOutput::default()
-    }
+    ManualOutput::only_48k()
 }
 
 /// Исходный сигнал фикстур в момент `t`: 440 Гц слева, 660 Гц справа.
@@ -169,11 +65,11 @@ fn max_error_48k(played: &[f32], t0: f64, from: usize, to: usize) -> f32 {
         .fold(0.0, f32::max)
 }
 
-fn wait_event(rx: &Receiver<EngineEvent>, pred: impl Fn(&EngineEvent) -> bool) -> EngineEvent {
+fn wait_event(rx: &Receiver<EngineMessage>, pred: impl Fn(&EngineEvent) -> bool) -> EngineEvent {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         let left = deadline.saturating_duration_since(Instant::now());
-        let event = rx.recv_timeout(left).expect("событие не пришло");
+        let event = rx.recv_timeout(left).expect("событие не пришло").event;
         if pred(&event) {
             return event;
         }
@@ -183,16 +79,6 @@ fn wait_event(rx: &Receiver<EngineEvent>, pred: impl Fn(&EngineEvent) -> bool) -
 /// Эталон: сэмплы `full.wav`.
 fn reference() -> Vec<f32> {
     read_wav("full.wav")
-}
-
-/// 16-битный WAV, прочитанный без Symphonia, чтобы эталон не зависел от проверяемого декодера.
-fn read_wav(name: &str) -> Vec<f32> {
-    let wav = std::fs::read(format!("{FIXTURES}/{name}")).unwrap();
-    let data = wav.windows(4).position(|w| w == b"data").unwrap() + 8;
-    wav[data..]
-        .chunks_exact(2)
-        .map(|b| f32::from(i16::from_le_bytes([b[0], b[1]])) / 32768.0)
-        .collect()
 }
 
 #[test]
@@ -242,14 +128,14 @@ fn late_next_track_still_joins_without_gap() {
 /// «Играть» — забирать сэмплы, как устройство, — пока не придёт нужное событие.
 fn play_until(
     output: &ManualOutput,
-    rx: &Receiver<EngineEvent>,
+    rx: &Receiver<EngineMessage>,
     pred: impl Fn(&EngineEvent) -> bool,
 ) -> Vec<f32> {
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut played = Vec::new();
     loop {
         assert!(Instant::now() < deadline, "событие не пришло");
-        while let Ok(event) = rx.try_recv() {
+        while let Ok(event) = rx.try_recv().map(|m| m.event) {
             if pred(&event) {
                 return played;
             }
@@ -393,7 +279,7 @@ fn small_buffer_does_not_stall() {
         buffer_ms: 100, // 8 кГц × 0,1 с = 800 кадров — меньше порога записи
         ..EngineConfig::default()
     };
-    let engine = Engine::new(Box::new(output.clone()), Fixtures::load(), config, tx);
+    let engine = Engine::new(Box::new(output.clone()), Fixtures::shared(), config, tx);
     engine.play(track(1, "mono8k.flac"));
     let played = play_until(&output, &rx, |e| *e == EngineEvent::Finished);
     assert_eq!(played.len(), 4_000);
@@ -474,4 +360,67 @@ fn seek_with_resampling_lands_on_time() {
     // Нарастание громкости (5 мс) и переходный процесс фильтра пропускаем.
     let err = max_error_48k(&after, 0.25, 1000, 4000);
     assert!(err < 1e-3, "отклонение после перемотки {err}");
+}
+
+#[test]
+fn broken_upcoming_track_is_skipped_without_waiting() {
+    let output = ManualOutput::default();
+    let (engine, rx) = engine(&output);
+    engine.play(track(1, "a.flac"));
+    engine.set_upcoming(
+        TrackId(1),
+        vec![track(2, "missing.flac"), track(3, "b.flac")],
+    );
+    let events = Mutex::new(Vec::new());
+    let played = play_until(&output, &rx, |e| {
+        events.lock().unwrap().push(e.clone());
+        *e == EngineEvent::Finished
+    });
+    // Сломанный трек перешагнут внутри движка: склейка a + b — исходный сигнал.
+    assert!(played == reference());
+    let events = events.into_inner().unwrap();
+    assert!(events.iter().any(|e| matches!(
+        e,
+        EngineEvent::Error {
+            track: Some(TrackId(2)),
+            ..
+        }
+    )));
+    assert!(events.contains(&EngineEvent::TrackStarted {
+        track: TrackId(3),
+        gapless: true
+    }));
+}
+
+#[test]
+fn upcoming_for_another_track_is_ignored() {
+    let output = ManualOutput::default();
+    let (engine, rx) = engine(&output);
+    engine.play(track(1, "a.flac"));
+    // Список «после трека 9»: движок готовит не его — ответ устарел.
+    engine.set_upcoming(TrackId(9), vec![track(2, "b.flac")]);
+    let played = play_until(&output, &rx, |e| *e == EngineEvent::Finished);
+    assert_eq!(played.len(), 11_113 * 2);
+}
+
+#[test]
+fn play_and_stop_start_new_epochs() {
+    let output = ManualOutput::default();
+    let (engine, rx) = engine(&output);
+    let first = engine.play(track(1, "a.flac"));
+    let second = engine.play(track(2, "b.flac"));
+    assert!(second > first);
+    // Событие о начале — с эпохой той команды, чей трек зазвучал.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        assert!(Instant::now() < deadline, "трек не зазвучал");
+        output.pull(1024);
+        if let Ok(m) = rx.try_recv() {
+            if let EngineEvent::TrackStarted { track, .. } = m.event {
+                assert_eq!((track, m.epoch), (TrackId(2), second));
+                break;
+            }
+        }
+    }
+    assert!(engine.stop() > second);
 }

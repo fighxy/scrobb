@@ -1,6 +1,6 @@
 [package]
 name = "player-core"
-description = "Фасад ядра: команды, состояние, события; связывает модули"
+description = "Фасад ядра: очередь, библиотека и движок за одним API команд и событий"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -22,3 +22,6 @@ scrobb-sync.workspace = true
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+player-testkit.workspace = true

@@ -19,3 +19,4 @@ workspace = true
 [dev-dependencies]
 player-domain.workspace = true
 player-ports.workspace = true
+player-testkit.workspace = true

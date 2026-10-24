@@ -28,6 +28,7 @@ player-history = { path = "crates/player-history" }
 player-metadata = { path = "crates/player-metadata" }
 player-plugins = { path = "crates/player-plugins" }
 player-core = { path = "crates/player-core" }
+player-testkit = { path = "crates/player-testkit" }
 
 [workspace.lints.rust]
 unsafe_code = "deny"
