@@ -143,6 +143,8 @@ export type LibraryEvent =
   | { type: "scanning"; data: Scanning }
   | { type: "changed" }
   | { type: "playlists" }
+  /** Плейлист из «Открыть с помощью» при открытом окне — показать его. */
+  | { type: "opened"; data: PlaylistId }
   | { type: "error"; data: string };
 
 /** Всё, что окну нужно при открытии (`bridge::Snapshot`). */

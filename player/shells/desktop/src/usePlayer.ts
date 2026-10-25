@@ -87,6 +87,9 @@ export function usePlayer(backend: Backend) {
         case "changed":
           refreshLibrary();
           break;
+        case "opened":
+          setOpenedPlaylist(event.data);
+          break;
         case "error":
           toast(event.data);
           break;

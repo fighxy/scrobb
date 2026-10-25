@@ -113,9 +113,10 @@ impl Player {
         })
     }
 
-    /// Аргументы командной строки («Открыть с помощью» в файловом менеджере):
-    /// папки становятся источниками, плейлисты импортируются (последний окно
-    /// откроет), остальные файлы добавляются и играют с первого.
+    /// Аргументы командной строки («Открыть с помощью» в файловом менеджере,
+    /// на Windows — и второй запуск при открытом окне): папки становятся
+    /// источниками, плейлисты импортируются (последний окно откроет),
+    /// остальные файлы добавляются и играют с первого.
     pub fn open_paths(&self, paths: Vec<String>) {
         let (folders, files): (Vec<_>, Vec<_>) =
             paths.into_iter().partition(|p| Path::new(p).is_dir());
@@ -125,16 +126,22 @@ impl Player {
             }
         }
         let (lists, files): (Vec<_>, Vec<_>) = files.into_iter().partition(|p| is_playlist_file(p));
+        let mut opened = None;
         for list in lists {
             match self.import_file(&list) {
                 Ok(report) => {
-                    *lock(&self.opened) = Some(report.playlist.id);
+                    opened = Some(report.playlist.id);
                     self.forwarder.emit_library(LibraryEvent::Playlists);
                 }
                 Err(e) => self
                     .forwarder
                     .emit_library(LibraryEvent::Error(describe(&e))),
             }
+        }
+        if let Some(id) = opened {
+            // Окно, открывшееся позже, возьмёт плейлист из снимка, открытое — из события.
+            *lock(&self.opened) = Some(id.clone());
+            self.forwarder.emit_library(LibraryEvent::Opened(id));
         }
         let first_file = files.first().cloned();
         self.library.add_files(files);

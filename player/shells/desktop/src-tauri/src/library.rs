@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 use player_domain::{MediaUri, Track, TrackId};
 use player_library::scan::{self, is_inside};
 use player_library::{MemoryLibrary, TrackStore, tags};
+use player_playlists::PlaylistId;
 use serde::{Deserialize, Serialize};
 
 use crate::adapters::LocalFiles;
@@ -42,6 +43,8 @@ pub enum LibraryEvent {
     Changed,
     /// Плейлисты изменились не из окна (импорт из командной строки).
     Playlists,
+    /// Плейлист из «Открыть с помощью» — окно показывает его.
+    Opened(PlaylistId),
     /// Ошибка, которую стоит показать.
     Error(String),
 }

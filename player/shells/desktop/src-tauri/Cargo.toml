@@ -40,6 +40,10 @@ scrobb-client = { path = "../../../core/crates/scrobb-client" }
 player-output-cpal = { path = "../../../core/crates/player-output-cpal" }
 player-store-sqlite = { path = "../../../core/crates/player-store-sqlite" }
 
+[target.'cfg(windows)'.dependencies]
+# Второй запуск передаёт аргументы первому окну (ассоциации плейлистов в установщике).
+tauri-plugin-single-instance = "=3.0.0-alpha.2"
+
 [lints.rust]
 unsafe_code = "deny"
 
