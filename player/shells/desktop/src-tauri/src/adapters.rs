@@ -46,9 +46,28 @@ impl Clock for SystemClock {
 pub struct LocalFiles;
 
 impl FileAccess for LocalFiles {
-    fn list(&self, _: &MediaUri) -> Result<Vec<FileEntry>, PortError> {
-        // Сканер папок — следующий шаг (README оболочки).
-        Err(PortError::Unsupported)
+    /// Содержимое папки. Ссылки на папки не раскрываются (`file_type` без
+    /// перехода по ссылке): так обход не зациклится на ссылке на родителя.
+    fn list(&self, dir: &MediaUri) -> Result<Vec<FileEntry>, PortError> {
+        let read =
+            std::fs::read_dir(&dir.0).map_err(|e| PortError::Other(format!("{}: {e}", dir.0)))?;
+        Ok(read
+            .flatten()
+            .filter_map(|entry| {
+                let meta = entry.metadata().ok()?;
+                let modified_ms = meta
+                    .modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                    .map_or(0, |d| d.as_millis() as i64);
+                Some(FileEntry {
+                    uri: MediaUri(entry.path().to_string_lossy().into_owned()),
+                    is_dir: entry.file_type().ok()?.is_dir(),
+                    size: meta.len(),
+                    modified_ms,
+                })
+            })
+            .collect())
     }
 
     fn open(&self, uri: &MediaUri) -> Result<Box<dyn MediaStream>, PortError> {
@@ -179,6 +198,17 @@ mod tests {
                 .open(&MediaUri("/nope/nope.flac".into()))
                 .is_err()
         );
+
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        let mut listed = LocalFiles
+            .list(&MediaUri(dir.to_string_lossy().into_owned()))
+            .unwrap();
+        listed.sort_by(|a, b| a.uri.0.cmp(&b.uri.0));
+        let kinds: Vec<_> = listed.iter().map(|e| e.is_dir).collect();
+        assert_eq!(kinds, [false, true]);
+        assert_eq!(listed[0].size, 3);
+        assert!(listed[0].modified_ms > 0);
+        assert!(LocalFiles.list(&MediaUri("/nope/nope".into())).is_err());
         std::fs::remove_dir_all(dir).unwrap();
     }
 

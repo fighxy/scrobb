@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { Backend, Command, PlayerState, PlayRecord, ScrobbleStatus, Track } from "./core";
+import type { Backend, Command, PlayerState, PlayRecord, Scanning, ScrobbleStatus, Track } from "./core";
 import { describeError } from "./core";
 import { livePosition } from "./format";
 
@@ -28,6 +28,8 @@ export function usePlayer(backend: Backend) {
   const [state, setState] = useState<PlayerState>(EMPTY);
   const [receivedAt, setReceivedAt] = useState(() => performance.now());
   const [tracks, setTracks] = useState<Track[]>([]);
+  const [folders, setFolders] = useState<string[]>([]);
+  const [scanning, setScanning] = useState<Scanning | null>(null);
   const [scrobbling, setScrobbling] = useState<ScrobbleStatus | null>(null);
   const [scrobblingAvailable, setScrobblingAvailable] = useState(false);
   const [linkCode, setLinkCode] = useState<LinkCode | null>(null);
@@ -43,6 +45,15 @@ export function usePlayer(backend: Backend) {
 
   const refreshHistory = useCallback(() => {
     backend.recentPlays(null, 50).then(setHistory, (e) => toast(describeError(e)));
+  }, [backend, toast]);
+
+  // Библиотеку целиком перечитываем из снимка: после сканирования и смены папок.
+  const refreshLibrary = useCallback(() => {
+    backend.snapshot().then((snap) => {
+      setTracks(snap.tracks);
+      setFolders(snap.folders);
+      setScanning(snap.scanning);
+    }, (e) => toast(describeError(e)));
   }, [backend, toast]);
 
   useEffect(() => {
@@ -69,11 +80,26 @@ export function usePlayer(backend: Backend) {
           break;
       }
     });
+    const unlistenLibrary = backend.onLibraryEvent((event) => {
+      switch (event.type) {
+        case "scanning":
+          setScanning(event.data);
+          break;
+        case "changed":
+          refreshLibrary();
+          break;
+        case "error":
+          toast(event.data);
+          break;
+      }
+    });
     backend.snapshot().then((snap) => {
       if (cancelled) return;
       setState(snap.state);
       setReceivedAt(performance.now());
       setTracks(snap.tracks);
+      setFolders(snap.folders);
+      setScanning(snap.scanning);
       setScrobbling((current) => current ?? snap.scrobbling);
       setScrobblingAvailable(snap.scrobbling_available);
     }, (e) => toast(describeError(e)));
@@ -82,8 +108,9 @@ export function usePlayer(backend: Backend) {
       cancelled = true;
       clearTimeout(historyTimer);
       unlisten.then((stop) => stop());
+      unlistenLibrary.then((stop) => stop());
     };
-  }, [backend, refreshHistory, toast]);
+  }, [backend, refreshHistory, refreshLibrary, toast]);
 
   const run = useCallback(
     (command: Command) => {
@@ -104,10 +131,35 @@ export function usePlayer(backend: Backend) {
     }
   }, [backend, toast]);
 
+  const addFolder = useCallback(async () => {
+    try {
+      const path = await backend.pickFolder();
+      if (!path) return;
+      const added = await backend.addFolder(path);
+      if (added) refreshLibrary();
+      else toast("Эта папка уже в библиотеке");
+    } catch (e) {
+      toast(describeError(e));
+    }
+  }, [backend, refreshLibrary, toast]);
+
+  const removeFolder = useCallback(
+    (path: string) => {
+      backend.removeFolder(path).catch((e) => toast(describeError(e)));
+    },
+    [backend, toast],
+  );
+
+  const rescan = useCallback(() => {
+    backend.rescan().catch((e) => toast(describeError(e)));
+  }, [backend, toast]);
+
   return {
     state,
     receivedAt,
     tracks,
+    folders,
+    scanning,
     scrobbling,
     scrobblingAvailable,
     linkCode,
@@ -115,6 +167,9 @@ export function usePlayer(backend: Backend) {
     toasts,
     run,
     addFiles,
+    addFolder,
+    removeFolder,
+    rescan,
   };
 }
 

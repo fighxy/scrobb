@@ -97,10 +97,28 @@ export interface PlayRecord {
   origin: string;
 }
 
+/** Ход сканирования папки (`library::Scanning`). */
+export interface Scanning {
+  folder: string;
+  /** Сколько аудиофайлов найдено. */
+  found: number;
+  /** У скольких прочитаны теги. */
+  read: number;
+}
+
+/** События библиотеки оболочки (`library://event`). */
+export type LibraryEvent =
+  | { type: "scanning"; data: Scanning }
+  | { type: "changed" }
+  | { type: "error"; data: string };
+
 /** Всё, что окну нужно при открытии (`bridge::Snapshot`). */
 export interface Snapshot {
   state: PlayerState;
   tracks: Track[];
+  /** Папки-источники: запоминаются и сканируются при запуске. */
+  folders: string[];
+  scanning: Scanning | null;
   scrobbling: ScrobbleStatus | null;
   scrobbling_available: boolean;
 }
@@ -116,6 +134,12 @@ export interface Backend {
   snapshot(): Promise<Snapshot>;
   pickFiles(): Promise<string[]>;
   addFiles(paths: string[]): Promise<Added>;
+  pickFolder(): Promise<string | null>;
+  /** `false` — папка уже входит в одну из добавленных. */
+  addFolder(path: string): Promise<boolean>;
+  removeFolder(path: string): Promise<void>;
+  rescan(): Promise<void>;
+  onLibraryEvent(handler: (event: LibraryEvent) => void): Promise<() => void>;
   recentPlays(beforeMs: number | null, limit: number): Promise<PlayRecord[]>;
   onEvent(handler: (event: CoreEvent) => void): Promise<() => void>;
   /** Открыть ссылку системным браузером. */

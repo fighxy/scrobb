@@ -1,6 +1,7 @@
-//! Библиотека: трек по идентификатору ([`TrackStore`]) и чтение тегов
-//! ([`tags`], lofty, через порт `FileAccess`). Позже — сканер, SQLite с FTS5,
-//! умные плейлисты (свой язык запросов → SQL), слежение за изменениями папок.
+//! Библиотека: трек по идентификатору ([`TrackStore`]), сканер папок
+//! ([`scan`]) и чтение тегов ([`tags`], lofty) — оба через порт `FileAccess`.
+//! Позже — база SQLite с FTS5, умные плейлисты (свой язык запросов → SQL),
+//! слежение за изменениями папок.
 //!
 //! Большие списки отдаются окнами (`player_domain::Page`), а не целиком —
 //! `docs/player-architecture.md` §3.3.
@@ -10,6 +11,7 @@ use std::sync::RwLock;
 
 use player_domain::{Track, TrackId};
 
+pub mod scan;
 pub mod tags;
 
 /// Откуда фасад берёт трек по идентификатору: в очереди — идентификаторы,
@@ -37,6 +39,14 @@ impl MemoryLibrary {
             .write()
             .unwrap_or_else(|e| e.into_inner())
             .insert(track.id, track);
+    }
+
+    /// Убрать трек, например когда файл удалили с диска.
+    pub fn remove(&self, id: TrackId) {
+        self.tracks
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&id);
     }
 }
 

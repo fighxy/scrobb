@@ -37,9 +37,14 @@ export function App({ backend }: { backend: Backend }) {
       <main className="content">
         <Library
           tracks={p.tracks}
+          folders={p.folders}
+          scanning={p.scanning}
           currentId={currentId}
           status={p.state.status}
-          onAdd={p.addFiles}
+          onAddFiles={p.addFiles}
+          onAddFolder={p.addFolder}
+          onRemoveFolder={p.removeFolder}
+          onRescan={p.rescan}
           onPlay={(start) => p.run({ type: "play_queue", data: { tracks: p.tracks.map((t) => t.id), start } })}
         />
         <History plays={p.history} />

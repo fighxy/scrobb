@@ -1,21 +1,27 @@
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useRef } from "react";
-import type { PlaybackStatus, Track, TrackId } from "../core";
-import { artists, duration } from "../format";
+import type { PlaybackStatus, Scanning, Track, TrackId } from "../core";
+import { artists, duration, folderName } from "../format";
 import { Icon } from "./icons";
 
 interface Props {
   tracks: Track[];
+  folders: string[];
+  scanning: Scanning | null;
   currentId: TrackId | null;
   status: PlaybackStatus;
   onPlay: (index: number) => void;
-  onAdd: () => void;
+  onAddFiles: () => void;
+  onAddFolder: () => void;
+  onRemoveFolder: (path: string) => void;
+  onRescan: () => void;
 }
 
 const ROW = 40;
 
 /** Список треков: виртуализирован, поэтому и сто тысяч строк не тормозят окно. */
-export function Library({ tracks, currentId, status, onPlay, onAdd }: Props) {
+export function Library(props: Props) {
+  const { tracks, folders, scanning, currentId, status, onPlay, onAddFiles, onAddFolder } = props;
   const scroller = useRef<HTMLDivElement>(null);
   const virtual = useVirtualizer({
     count: tracks.length,
@@ -29,17 +35,36 @@ export function Library({ tracks, currentId, status, onPlay, onAdd }: Props) {
       <header className="panel-head">
         <h2>Библиотека</h2>
         <span className="muted">{tracks.length ? `${tracks.length} треков` : ""}</span>
-        <button className="button" onClick={onAdd}>
-          <Icon name="plus" size={18} /> Добавить файлы
-        </button>
+        <div className="head-actions">
+          <button className="button" onClick={onAddFolder} title="Добавить папку" aria-label="Добавить папку">
+            <Icon name="folder" size={18} /> <span className="label">Добавить папку</span>
+          </button>
+          <button className="button" onClick={onAddFiles} title="Добавить файлы" aria-label="Добавить файлы">
+            <Icon name="plus" size={18} /> <span className="label">Файлы</span>
+          </button>
+        </div>
       </header>
+      {(folders.length > 0 || scanning) && <Folders {...props} />}
       {tracks.length === 0 ? (
         <div className="empty">
-          <p>Здесь будет ваша музыка.</p>
-          <p className="muted">Добавьте файлы — FLAC, MP3, AAC, Ogg, WAV, ALAC.</p>
-          <button className="button primary" onClick={onAdd}>
-            Добавить файлы
-          </button>
+          {scanning ? (
+            <p>Ищу музыку в папке «{folderName(scanning.folder)}»…</p>
+          ) : (
+            <>
+              <p>Здесь будет ваша музыка.</p>
+              <p className="muted">
+                Добавьте папку — плеер найдёт в ней все треки (FLAC, MP3, AAC, ALAC, Ogg, WAV) и запомнит её.
+              </p>
+              <div className="empty-actions">
+                <button className="button primary" onClick={onAddFolder}>
+                  Добавить папку
+                </button>
+                <button className="button" onClick={onAddFiles}>
+                  или отдельные файлы
+                </button>
+              </div>
+            </>
+          )}
         </div>
       ) : (
         <>
@@ -83,5 +108,34 @@ export function Library({ tracks, currentId, status, onPlay, onAdd }: Props) {
         </>
       )}
     </section>
+  );
+}
+
+/** Папки-источники: имя, полный путь в подсказке, «убрать»; ход сканирования. */
+function Folders({ folders, scanning, onRemoveFolder, onRescan }: Props) {
+  return (
+    <div className="folders" aria-label="Папки библиотеки">
+      {folders.map((f) => (
+        <span key={f} className="folder" title={f}>
+          <Icon name="folder" size={14} />
+          {folderName(f)}
+          <button className="remove" aria-label={`Убрать папку ${folderName(f)}`} title="Убрать из библиотеки" onClick={() => onRemoveFolder(f)}>
+            <Icon name="close" size={12} />
+          </button>
+        </span>
+      ))}
+      {scanning ? (
+        <span className="scanning muted" role="status">
+          <span className="spinner" aria-hidden="true" />
+          {scanning.read > 0
+            ? `«${folderName(scanning.folder)}»: прочитано ${scanning.read} из ${scanning.found}`
+            : `«${folderName(scanning.folder)}»: найдено ${scanning.found}`}
+        </span>
+      ) : (
+        <button className="link" onClick={onRescan} title="Найти новые и удалённые файлы">
+          Обновить
+        </button>
+      )}
+    </div>
   );
 }

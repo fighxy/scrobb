@@ -38,6 +38,12 @@ export const OUTCOME: Record<Outcome, string> = {
   interrupted: "прервано",
 };
 
+/** Имя папки для подписи: последняя часть пути. */
+export function folderName(path: string): string {
+  const parts = path.split(/[\\/]/).filter(Boolean);
+  return parts.at(-1) ?? path;
+}
+
 export function artists(list: string[]): string {
   return list.length ? list.join(", ") : "Неизвестный артист";
 }

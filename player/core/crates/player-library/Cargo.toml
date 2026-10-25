@@ -1,6 +1,6 @@
 [package]
 name = "player-library"
-description = "Библиотека: доступ к трекам по id, чтение тегов; сканер, SQLite, поиск — позже"
+description = "Библиотека: доступ к трекам по id, сканер папок, чтение тегов; SQLite, поиск — позже"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

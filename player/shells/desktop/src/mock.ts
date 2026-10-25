@@ -3,15 +3,18 @@
 // пауза, перемотка, история, привязка Scrobb с кодом.
 //
 // Параметры адреса: `?demo=empty` — пустая библиотека; `?demo=playing` —
-// сразу играет трек; `?demo=linking` — открыто окно привязки.
+// сразу играет трек; `?demo=linking` — открыто окно привязки;
+// `?demo=scanning` — идёт сканирование папки.
 
 import type {
   Added,
   Backend,
   Command,
   CoreEvent,
+  LibraryEvent,
   PlayerState,
   PlayRecord,
+  Scanning,
   ScrobbleStatus,
   Snapshot,
   Track,
@@ -51,7 +54,30 @@ function track(i: number, [title, artist, album, duration]: (typeof DEMO)[number
 export function createMockBackend(search = location.search): Backend {
   const demo = new URLSearchParams(search).get("demo");
   const listeners = new Set<(e: CoreEvent) => void>();
+  const libraryListeners = new Set<(e: LibraryEvent) => void>();
   let tracks: Track[] = demo === "empty" ? [] : DEMO.map((d, i) => track(i, d));
+  let folders: string[] = demo === "empty" ? [] : ["/home/ivan/Музыка"];
+  let scanning: Scanning | null =
+    demo === "scanning" ? { folder: "/home/ivan/Музыка/Новое", found: 1240, read: 386 } : null;
+  if (demo === "scanning") folders = [...folders, "/home/ivan/Музыка/Новое"];
+  const emitLibrary = (event: LibraryEvent) => setTimeout(() => libraryListeners.forEach((l) => l(event)), 0);
+  // Имитация сканирования: прогресс, затем треки, которых ещё нет.
+  const simulateScan = (path: string) => {
+    const total = DEMO.length;
+    for (let read = 0; read <= total; read += 3) {
+      setTimeout(() => {
+        scanning = { folder: path, found: total, read: Math.min(read, total) };
+        emitLibrary({ type: "scanning", data: scanning });
+      }, read * 60);
+    }
+    setTimeout(() => {
+      const known = new Set(tracks.map((t) => t.uri));
+      const found = DEMO.map((d, i) => track(i, d)).filter((t) => !known.has(t.uri));
+      tracks = [...tracks, ...found.map((t, i) => ({ ...t, id: tracks.length + i + 1 }))];
+      scanning = null;
+      emitLibrary({ type: "changed" });
+    }, total * 60 + 100);
+  };
   let queue: number[] = tracks.map((t) => t.id);
   let index = 0;
   let state: PlayerState = {
@@ -163,7 +189,7 @@ export function createMockBackend(search = location.search): Backend {
       }
     },
     async snapshot(): Promise<Snapshot> {
-      return { state: { ...state, position_ms: position() }, tracks, scrobbling, scrobbling_available: true };
+      return { state: { ...state, position_ms: position() }, tracks, folders, scanning, scrobbling, scrobbling_available: true };
     },
     async pickFiles() {
       return ["/music/Кино/Последний герой/Бездельник.flac", "/music/Земфира/Земфира/Ариведерчи.mp3"];
@@ -178,6 +204,27 @@ export function createMockBackend(search = location.search): Backend {
     },
     async recentPlays(beforeMs, limit) {
       return history.filter((h) => beforeMs === null || h.started_at_ms < beforeMs).slice(0, limit);
+    },
+    async pickFolder() {
+      return "/home/ivan/Музыка";
+    },
+    async addFolder(path) {
+      if (folders.some((f) => path === f || path.startsWith(`${f}/`))) return false;
+      folders = [...folders.filter((f) => !f.startsWith(`${path}/`)), path];
+      simulateScan(path);
+      return true;
+    },
+    async removeFolder(path) {
+      folders = folders.filter((f) => f !== path);
+      tracks = tracks.filter((t) => !t.uri.startsWith(`${path}/`) && !t.uri.startsWith("/music/"));
+      emitLibrary({ type: "changed" });
+    },
+    async rescan() {
+      folders.forEach(simulateScan);
+    },
+    async onLibraryEvent(handler) {
+      libraryListeners.add(handler);
+      return () => libraryListeners.delete(handler);
     },
     async onEvent(handler) {
       listeners.add(handler);

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { PlayerState } from "./core";
-import { artists, duration, livePosition, playedAt } from "./format";
+import { artists, duration, folderName, livePosition, playedAt } from "./format";
 
 const state = (patch: Partial<PlayerState>): PlayerState => ({
   status: "playing",
@@ -45,6 +45,15 @@ describe("playedAt", () => {
     const now = new Date(2026, 9, 25, 18, 0).getTime();
     expect(playedAt(new Date(2026, 9, 25, 14, 5).getTime(), now)).toBe("14:05");
     expect(playedAt(new Date(2026, 9, 3, 9, 7).getTime(), now)).toMatch(/^3 окт.*09:07$/);
+  });
+});
+
+describe("folderName", () => {
+  it("takes the last part of unix and windows paths", () => {
+    expect(folderName("/home/ivan/Музыка")).toBe("Музыка");
+    expect(folderName("/home/ivan/Музыка/")).toBe("Музыка");
+    expect(folderName("C:\\Users\\Иван\\Music")).toBe("Music");
+    expect(folderName("/")).toBe("/");
   });
 });
 

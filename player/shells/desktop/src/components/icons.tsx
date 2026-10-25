@@ -9,6 +9,7 @@ const paths = {
   volume: "M4 9h4l5-4v14l-5-4H4zM16 8.5a5 5 0 0 1 0 7l-1.4-1.4a3 3 0 0 0 0-4.2z",
   plus: "M11 5h2v6h6v2h-6v6h-2v-6H5v-2h6z",
   close: "M6.4 5 12 10.6 17.6 5 19 6.4 13.4 12 19 17.6 17.6 19 12 13.4 6.4 19 5 17.6 10.6 12 5 6.4z",
+  folder: "M3 6a2 2 0 0 1 2-2h4.6l2 2H19a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2zm2 2v10h14V8z",
 } as const;
 
 export type IconName = keyof typeof paths;

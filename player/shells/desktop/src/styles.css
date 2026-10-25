@@ -153,8 +153,78 @@ button {
   font-size: 15px;
 }
 
-.panel-head .button {
+.head-actions {
+  display: flex;
+  gap: 8px;
   margin-left: auto;
+}
+
+/* Папки библиотеки. */
+.folders {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 0 16px 10px;
+  font-size: 13px;
+}
+
+.folder {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 260px;
+  padding: 3px 4px 3px 9px;
+  border-radius: 999px;
+  background: var(--panel-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.folder .remove {
+  display: inline-grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  border: 0;
+  border-radius: 50%;
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.folder .remove:hover {
+  background: var(--line);
+  color: var(--text);
+}
+
+.scanning {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.spinner {
+  width: 12px;
+  height: 12px;
+  border: 2px solid var(--line);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.empty-actions {
+  display: flex;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 12px;
 }
 
 .empty {
@@ -165,10 +235,6 @@ button {
 
 .empty p {
   margin: 4px 0;
-}
-
-.empty .button {
-  margin-top: 12px;
 }
 
 /* Кнопки. */
@@ -501,6 +567,11 @@ input[type="range"] {
 
   /* На узком окне название места не заслуживает: есть вкладки. */
   .brand {
+    display: none;
+  }
+
+  /* Кнопки библиотеки — только значками (подпись — во всплывающей подсказке). */
+  .head-actions .label {
     display: none;
   }
 

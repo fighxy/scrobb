@@ -17,7 +17,7 @@ player/core/                 Cargo workspace
     player-ports/            порты: звук, медиасессия, файлы, секреты, сеть, часы ─┐
     player-engine/           звуковой движок: gapless, ReplayGain, перемотка      │ нативный
     player-output-cpal/      вывод звука через cpal (адаптер порта AudioOutput)   │
-    player-library/          трек по id (в памяти), теги (lofty); SQLite — позже  │ ярус плеера
+    player-library/          трек по id, сканер папок, теги; SQLite — позже       │ ярус плеера
     player-store-sqlite/     SQLite: история прослушиваний и очередь отправки     │
     player-metadata/         MusicBrainz, AcoustID, кодировки (заготовка)         │
     player-plugins/          хост WASM-плагинов (заготовка)                       │
@@ -171,9 +171,9 @@ cargo run --release -p player-output-cpal --example play -- --rate=48000 a.flac 
 ## Что дальше
 
 По порядку из [player-architecture.md](../../docs/player-architecture.md) §9:
-1. Десктоп: медиаклавиши и системная медиасессия, сканер папок и база библиотеки ([README оболочки](../shells/desktop/README.md), «Чего пока нет»). Затем — спайк фонового воспроизведения в минимальных оболочках на Android и iOS.
+1. Десктоп: медиаклавиши и системная медиасессия, база библиотеки ([README оболочки](../shells/desktop/README.md), «Чего пока нет»). Затем — спайк фонового воспроизведения в минимальных оболочках на Android и iOS.
 2. UniFFI в `bindings/ffi`: Swift и Kotlin, callback-интерфейсы для `Observer` и портов.
-3. Библиотека: сканер папок, SQLite + FTS5, окна списков (чтение тегов через lofty уже есть — `player-library::tags`).
+3. Библиотека: SQLite + FTS5, окна списков (сканер папок и чтение тегов уже есть — `player-library::scan` и `player-library::tags`).
 4. `bindings/wasm`: wasm-bindgen и npm-пакет для веба и расширения.
 
 ## Лицензия

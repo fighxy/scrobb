@@ -4,6 +4,7 @@
 
 mod adapters;
 mod bridge;
+mod library;
 
 use tauri::{Manager, RunEvent};
 
@@ -15,11 +16,11 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             let player = bridge::Player::start(app.handle())?;
-            let files: Vec<String> = std::env::args()
+            let paths: Vec<String> = std::env::args()
                 .skip(1)
-                .filter(|a| std::path::Path::new(a).is_file())
+                .filter(|a| std::path::Path::new(a).exists())
                 .collect();
-            player.open_files(files);
+            player.open_paths(paths);
             app.manage(player);
             Ok(())
         })
@@ -27,6 +28,9 @@ pub fn run() {
             bridge::dispatch,
             bridge::snapshot,
             bridge::add_files,
+            bridge::add_folder,
+            bridge::remove_folder,
+            bridge::rescan_library,
             bridge::recent_plays,
         ])
         .build(tauri::generate_context!())
