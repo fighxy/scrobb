@@ -1,0 +1,224 @@
+# Установщики десктоп-плеера: Windows (NSIS), Linux (deb, AppImage), macOS (DMG).
+# На каждой платформе — тесты, сборка и дымовая проверка установки на
+# настоящей системе. Запуск вручную (платформы — флажками) или тегом v*;
+# по тегу — все три и черновик релиза со всеми файлами. Минуты — docs/ci-cd.md (§2).
+name: player-installers
+on:
+  workflow_dispatch:
+    inputs:
+      windows:
+        description: Windows — setup.exe (минута ×2)
+        type: boolean
+        default: true
+      linux:
+        description: Linux — deb и AppImage
+        type: boolean
+        default: true
+      macos:
+        description: macOS — DMG (минута ×10)
+        type: boolean
+        default: false
+  push:
+    tags: ['v*']
+permissions:
+  contents: read
+concurrency:
+  group: player-installers-${{ github.ref }}
+  cancel-in-progress: true
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  windows:
+    if: github.event_name == 'push' || inputs.windows
+    runs-on: windows-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Тег совпадает с версией приложения
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          version=$(jq -r .version player/shells/desktop/src-tauri/tauri.conf.json)
+          [ "v$version" = "$GITHUB_REF_NAME" ] || { echo "Тег $GITHUB_REF_NAME, а в tauri.conf.json версия $version"; exit 1; }
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22.22.0
+      - name: Rust и pnpm
+        run: |
+          rustup toolchain install 1.97.0 --profile minimal
+          rustup default 1.97.0
+          npm install --global pnpm@10.28.0
+      - name: Тесты ядра
+        working-directory: player/core
+        run: cargo test --workspace
+      - name: Интерфейс — типы и тесты
+        working-directory: player/shells/desktop
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm typecheck
+          pnpm test
+      - name: Тесты оболочки
+        working-directory: player/shells/desktop/src-tauri
+        run: cargo test
+      - name: Сборка установщика
+        working-directory: player/shells/desktop
+        run: pnpm tauri build
+      - name: Дымовая проверка установки
+        working-directory: player/shells/desktop
+        run: |
+          $setup = Get-ChildItem src-tauri/target/release/bundle/nsis/*-setup.exe | Select-Object -First 1
+          ./scripts/windows-smoke.ps1 -Installer $setup.FullName -Screenshot "$env:RUNNER_TEMP/smoke-windows.png"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: scrobb-player-windows
+          path: player/shells/desktop/src-tauri/target/release/bundle/nsis/*-setup.exe
+          if-no-files-found: error
+          retention-days: 7
+      - name: Снимок экрана после проверки
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: smoke-windows
+          path: ${{ runner.temp }}/smoke-windows.png
+          if-no-files-found: ignore
+          retention-days: 3
+
+  linux:
+    if: github.event_name == 'push' || inputs.linux
+    # Самая старая поддерживаемая Ubuntu: пакеты, собранные со старой glibc,
+    # работают и на новых дистрибутивах.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Тег совпадает с версией приложения
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          version=$(jq -r .version player/shells/desktop/src-tauri/tauri.conf.json)
+          [ "v$version" = "$GITHUB_REF_NAME" ] || { echo "Тег $GITHUB_REF_NAME, а в tauri.conf.json версия $version"; exit 1; }
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22.22.0
+      - name: Системные пакеты
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev libasound2-dev librsvg2-dev xvfb
+      - name: Rust и pnpm
+        run: |
+          rustup toolchain install 1.97.0 --profile minimal
+          rustup default 1.97.0
+          npm install --global pnpm@10.28.0
+      - name: Тесты ядра
+        working-directory: player/core
+        run: cargo test --workspace
+      - name: Интерфейс — типы и тесты
+        working-directory: player/shells/desktop
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm typecheck
+          pnpm test
+      - name: Тесты оболочки
+        working-directory: player/shells/desktop/src-tauri
+        run: cargo test
+      - name: Сборка пакетов
+        working-directory: player/shells/desktop
+        run: pnpm tauri build
+      - name: Дымовая проверка установки
+        working-directory: player/shells/desktop
+        run: |
+          scripts/linux-smoke.sh src-tauri/target/release/bundle/deb/*.deb \
+            src-tauri/target/release/bundle/appimage/*.AppImage "$RUNNER_TEMP/smoke-linux.png"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: scrobb-player-linux
+          path: |
+            player/shells/desktop/src-tauri/target/release/bundle/deb/*.deb
+            player/shells/desktop/src-tauri/target/release/bundle/appimage/*.AppImage
+          if-no-files-found: error
+          retention-days: 7
+      - name: Снимки экрана после проверки
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: smoke-linux
+          path: ${{ runner.temp }}/smoke-linux-*.png
+          if-no-files-found: ignore
+          retention-days: 3
+
+  macos:
+    if: github.event_name == 'push' || inputs.macos
+    # Apple Silicon. Минута macOS — самая дорогая, поэтому здесь только тесты
+    # ядра: интерфейс и оболочку проверяют джобы Windows и Linux.
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Тег совпадает с версией приложения
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          version=$(jq -r .version player/shells/desktop/src-tauri/tauri.conf.json)
+          [ "v$version" = "$GITHUB_REF_NAME" ] || { echo "Тег $GITHUB_REF_NAME, а в tauri.conf.json версия $version"; exit 1; }
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22.22.0
+      - name: Rust и pnpm
+        run: |
+          rustup toolchain install 1.97.0 --profile minimal
+          rustup default 1.97.0
+          npm install --global pnpm@10.28.0
+      - name: Тесты ядра
+        working-directory: player/core
+        run: cargo test --workspace
+      - name: Сборка образа
+        working-directory: player/shells/desktop
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm tauri build
+      - name: Дымовая проверка
+        working-directory: player/shells/desktop
+        run: scripts/macos-smoke.sh src-tauri/target/release/bundle/dmg/*.dmg "$RUNNER_TEMP/smoke-macos.png"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: scrobb-player-macos
+          path: player/shells/desktop/src-tauri/target/release/bundle/dmg/*.dmg
+          if-no-files-found: error
+          retention-days: 7
+      - name: Снимок экрана после проверки
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: smoke-macos
+          path: ${{ runner.temp }}/smoke-macos.png
+          if-no-files-found: ignore
+          retention-days: 3
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [windows, linux, macos]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: scrobb-player-*
+          merge-multiple: true
+          path: installers
+      - name: Черновик релиза
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            gh release upload "$TAG" installers/* --clobber
+          else
+            gh release create "$TAG" installers/* --draft --generate-notes --title "Scrobb Player $TAG"
+          fi

@@ -1,6 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Scrobb Player",
+  "mainBinaryName": "scrobb-player",
   "version": "0.1.0",
   "identifier": "ru.scrobb.player",
   "build": {
@@ -28,6 +29,10 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "publisher": "Scrobb",
+    "category": "Music",
+    "shortDescription": "Музыкальный плеер со скробблингом в Scrobb",
+    "longDescription": "Плеер для локальной музыки: бесшовные переходы, ReplayGain, плейлисты (M3U8, XSPF, JSPF), история прослушиваний и скробблинг в Scrobb.",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
