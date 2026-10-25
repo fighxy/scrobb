@@ -193,6 +193,8 @@ mod tests {
         let mut buf = String::new();
         std::io::Read::read_to_string(&mut stream, &mut buf).unwrap();
         assert_eq!(buf, "abc");
+        // Открытый файл на Windows не даст удалить папку в конце.
+        drop(stream);
         assert!(
             LocalFiles
                 .open(&MediaUri("/nope/nope.flac".into()))

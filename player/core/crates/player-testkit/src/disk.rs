@@ -71,9 +71,11 @@ impl TempDir {
         MediaUri(self.0.to_string_lossy().into_owned())
     }
 
-    /// Адрес файла внутри.
+    /// Адрес файла внутри — с разделителями системы, как его вернёт
+    /// `read_dir` (на Windows `Альбом/01.flac` → `Альбом\01.flac`).
     pub fn uri_of(&self, path: &str) -> MediaUri {
-        MediaUri(self.0.join(path).to_string_lossy().into_owned())
+        let path = path.split('/').fold(self.0.clone(), |p, part| p.join(part));
+        MediaUri(path.to_string_lossy().into_owned())
     }
 
     /// Путь папки.
