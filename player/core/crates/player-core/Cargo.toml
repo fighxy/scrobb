@@ -20,6 +20,7 @@ scrobb-rules.workspace = true
 scrobb-client.workspace = true
 scrobb-sync.workspace = true
 uuid.workspace = true
+serde.workspace = true
 getrandom.workspace = true
 
 [lints]
@@ -28,5 +29,4 @@ workspace = true
 [dev-dependencies]
 player-testkit.workspace = true
 player-store-sqlite.workspace = true
-serde.workspace = true
 serde_json.workspace = true

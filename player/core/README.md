@@ -17,7 +17,7 @@ player/core/                 Cargo workspace
     player-ports/            порты: звук, медиасессия, файлы, секреты, сеть, часы ─┐
     player-engine/           звуковой движок: gapless, ReplayGain, перемотка      │ нативный
     player-output-cpal/      вывод звука через cpal (адаптер порта AudioOutput)   │
-    player-library/          трек по id (в памяти); SQLite, поиск — позже         │ ярус плеера
+    player-library/          трек по id (в памяти), теги (lofty); SQLite — позже  │ ярус плеера
     player-store-sqlite/     SQLite: история прослушиваний и очередь отправки     │
     player-metadata/         MusicBrainz, AcoustID, кодировки (заготовка)         │
     player-plugins/          хост WASM-плагинов (заготовка)                       │
@@ -164,12 +164,16 @@ cargo run --release -p player-output-cpal --example play -- --rate=48000 a.flac 
 
 Проверено, что тесты ловят ошибки: каждая из 15 внесённых поломок (6 — в истории и отправке, 9 — в привязке и «сейчас играет») роняет хотя бы один тест.
 
+## Оболочки
+
+- **Десктоп** — [`player/shells/desktop`](../shells/desktop/README.md): Tauri 3 + React. Ядро подключено крейтом, без FFI; типы ядра для этого сериализуются (`serde`), формат закреплён тестом `crates/player-core/tests/json.rs`.
+
 ## Что дальше
 
 По порядку из [player-architecture.md](../../docs/player-architecture.md) §9:
-1. Спайк фонового воспроизведения в минимальных оболочках на Android и iOS.
+1. Десктоп: медиаклавиши и системная медиасессия, сканер папок и база библиотеки ([README оболочки](../shells/desktop/README.md), «Чего пока нет»). Затем — спайк фонового воспроизведения в минимальных оболочках на Android и iOS.
 2. UniFFI в `bindings/ffi`: Swift и Kotlin, callback-интерфейсы для `Observer` и портов.
-3. Библиотека: lofty, SQLite + FTS5, окна списков.
+3. Библиотека: сканер папок, SQLite + FTS5, окна списков (чтение тегов через lofty уже есть — `player-library::tags`).
 4. `bindings/wasm`: wasm-bindgen и npm-пакет для веба и расширения.
 
 ## Лицензия
@@ -178,4 +182,5 @@ cargo run --release -p player-output-cpal --example play -- --rate=48000 a.flac 
 
 Лицензии зависимостей:
 - движок: Symphonia — MPL-2.0 (копилефт на уровне файлов: изменения в её файлах нужно публиковать, наш код — нет), rtrb и rubato — MIT/Apache-2.0, cpal — Apache-2.0;
-- история: rusqlite — MIT, сама SQLite — общественное достояние, uuid и getrandom — MIT/Apache-2.0.
+- история: rusqlite — MIT, сама SQLite — общественное достояние, uuid и getrandom — MIT/Apache-2.0;
+- теги: lofty — MIT/Apache-2.0.

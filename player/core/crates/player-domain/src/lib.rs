@@ -1,19 +1,25 @@
 //! Доменные типы плеера, общие для всех модулей ядра и оболочек.
 //!
-//! Только данные, без ввода-вывода; собирается под wasm.
+//! Только данные, без ввода-вывода; собирается под wasm. Типы сериализуются
+//! (`serde`): так их получают оболочки, которым ядро отдаёт JSON, — окно Tauri
+//! и веб. Формат закреплён тестом `player-core/tests/json.rs`.
+
+use serde::{Deserialize, Serialize};
 
 /// Локальный идентификатор трека в базе этого устройства.
 /// Между устройствами трек узнаётся по `scrobb_sync::TrackKey`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct TrackId(pub u64);
 
 /// Где лежит файл: путь, `content://` на Android, закладка с правами на Apple.
 /// Ядро не разбирает адрес — его понимает только порт `FileAccess`.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct MediaUri(pub String);
 
 /// Значения ReplayGain из тегов.
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 pub struct ReplayGain {
     /// Усиление трека, дБ.
     pub track_gain_db: Option<f32>,
@@ -26,7 +32,7 @@ pub struct ReplayGain {
 }
 
 /// Трек библиотеки.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Track {
     /// Локальный идентификатор.
     pub id: TrackId,
@@ -53,7 +59,8 @@ pub struct Track {
 }
 
 /// Состояние воспроизведения.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum PlaybackStatus {
     /// Ничего не играет.
     #[default]
@@ -67,7 +74,8 @@ pub enum PlaybackStatus {
 }
 
 /// Режим повтора.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum RepeatMode {
     /// Без повтора.
     #[default]
@@ -79,7 +87,7 @@ pub enum RepeatMode {
 }
 
 /// Снимок состояния плеера, который ядро отдаёт оболочкам.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct PlayerState {
     /// Состояние.
     pub status: PlaybackStatus,
@@ -98,7 +106,7 @@ pub struct PlayerState {
 }
 
 /// Окно большого списка: библиотека не передаётся через FFI целиком.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Page<T> {
     /// Элементы окна.
     pub items: Vec<T>,

@@ -24,6 +24,7 @@ use player_playback::Queue;
 use player_ports::{AudioOutput, Clock, FileAccess, HttpTransport, MediaSession, SecureStore};
 use scrobb_api::{ClientKind, Thresholds};
 use scrobb_client::{ClientInfo, ScrobbClient};
+use serde::{Deserialize, Serialize};
 
 mod history;
 mod scrobb;
@@ -88,7 +89,11 @@ pub struct ScrobbSettings {
 }
 
 /// Команда от оболочки: кнопки, медиаклавиши, экран блокировки, автомобиль.
-#[derive(Debug, Clone, PartialEq)]
+///
+/// В JSON — `{"type": "play_queue", "data": {"tracks": [1, 2], "start": 0}}`,
+/// `{"type": "pause"}`, `{"type": "set_volume", "data": 0.5}`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum Command {
     /// Играть очередь с позиции `start`.
     PlayQueue {
@@ -128,8 +133,9 @@ pub enum Command {
     UnlinkScrobbAccount,
 }
 
-/// Событие для оболочки.
-#[derive(Debug, Clone, PartialEq)]
+/// Событие для оболочки. В JSON — `{"type": "state", "data": {…}}`.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum Event {
     /// Новый снимок состояния.
     State(Box<PlayerState>),
@@ -148,7 +154,7 @@ pub enum Event {
 }
 
 /// Состояние отправки в Scrobb.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScrobbleStatus {
     /// Сколько засчитанных прослушиваний ждёт отправки.
     pub pending: usize,
@@ -157,7 +163,8 @@ pub struct ScrobbleStatus {
 }
 
 /// Что с отправкой в Scrobb.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ScrobbleState {
     /// Устройство не привязано: история пишется, в очередь ничего не ставится.
     NotLinked,
@@ -180,7 +187,7 @@ pub trait Observer: Send + Sync {
 }
 
 /// Что доступно на этой платформе; оболочка показывает только доступное.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Capabilities {
     /// Вывод без изменений через USB-ЦАП или монопольный режим.
     pub bit_perfect: bool,
@@ -190,8 +197,9 @@ pub struct Capabilities {
     pub scrobbling: bool,
 }
 
-/// Ошибка команды.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Ошибка команды. В JSON — `{"type": "missing_port", "data": "http"}`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum CoreError {
     /// Команда ещё не реализована в заготовке.
     NotImplemented(&'static str),

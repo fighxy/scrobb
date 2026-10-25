@@ -14,6 +14,7 @@ serde_json = "1"
 rusqlite = { version = "0.41.0", features = ["bundled", "fallible_uint"] }
 uuid = { version = "1.29.0", features = ["v7"] }
 getrandom = "0.4.3"
+lofty = "0.25.4"
 
 # Ярус Scrobb: не зависит от плеера, собирается под wasm32 (README, «Ярусы»).
 scrobb-api = { path = "crates/scrobb-api" }

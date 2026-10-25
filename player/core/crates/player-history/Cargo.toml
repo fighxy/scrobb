@@ -10,6 +10,7 @@ publish.workspace = true
 player-domain.workspace = true
 scrobb-api.workspace = true
 scrobb-rules.workspace = true
+serde.workspace = true
 
 [lints]
 workspace = true

@@ -1,0 +1,44 @@
+[package]
+name = "scrobb-player-desktop"
+description = "Десктоп-оболочка плеера Scrobb: Tauri 3 + веб-интерфейс поверх ядра player/core"
+version = "0.1.0"
+edition = "2024"
+# Tauri 3 требует 1.95; ядро остаётся на своём MSRV (player/core).
+rust-version = "1.95"
+publish = false
+
+# Отдельный workspace: оболочка тянет GTK и WebKit, проверка ядра от них не зависит.
+[workspace]
+
+[lib]
+name = "scrobb_player_desktop"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+# Альфа ломает API между выпусками — версии точные.
+tauri-build = { version = "=3.0.0-alpha.4", features = [] }
+
+[dependencies]
+tauri = { version = "=3.0.0-alpha.5", features = [] }
+tauri-runtime-wry = "=3.0.0-alpha.5"
+tauri-plugin-dialog = "=3.0.0-alpha.4"
+tauri-plugin-opener = "=3.0.0-alpha.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ureq = "3.5.0"
+keyring = "4.2.0"
+
+player-core = { path = "../../../core/crates/player-core" }
+player-domain = { path = "../../../core/crates/player-domain" }
+player-history = { path = "../../../core/crates/player-history" }
+player-library = { path = "../../../core/crates/player-library" }
+player-ports = { path = "../../../core/crates/player-ports" }
+scrobb-client = { path = "../../../core/crates/scrobb-client" }
+player-output-cpal = { path = "../../../core/crates/player-output-cpal" }
+player-store-sqlite = { path = "../../../core/crates/player-store-sqlite" }
+
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }

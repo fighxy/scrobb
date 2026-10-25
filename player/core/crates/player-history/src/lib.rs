@@ -15,6 +15,7 @@ use std::collections::BTreeMap;
 
 use player_domain::{Track, TrackId};
 use scrobb_api::{ClientKind, ListenSubmission, Mbids, NowPlaying, Source};
+use serde::{Deserialize, Serialize};
 
 mod memory;
 
@@ -33,11 +34,13 @@ pub const QUEUE_MAX_AGE_MS: i64 = 14 * 24 * 60 * 60 * 1000;
 
 /// Глобальный идентификатор прослушивания: UUIDv7 в каноническом виде.
 /// Он же `client_id` при отправке в любой сервис.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct PlayId(pub String);
 
 /// Чем закончилось прослушивание.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Outcome {
     /// Ещё играет (или приложение закрылось, а запуск после этого ещё не разобрал).
     Playing,
@@ -82,7 +85,7 @@ impl Outcome {
 }
 
 /// Метаданные трека на момент прослушивания.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TrackSnapshot {
     /// Название.
     pub title: String,
@@ -129,7 +132,7 @@ pub struct NewPlay {
 }
 
 /// Запись истории.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlayRecord {
     /// Идентификатор.
     pub id: PlayId,
@@ -154,7 +157,8 @@ pub struct PlayRecord {
 }
 
 /// Состояние доставки прослушивания в сервис.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum DeliveryState {
     /// Ждёт отправки.
     Pending,

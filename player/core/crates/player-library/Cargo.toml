@@ -1,6 +1,6 @@
 [package]
 name = "player-library"
-description = "Библиотека: доступ к трекам по id; сканер, теги, SQLite, поиск — позже"
+description = "Библиотека: доступ к трекам по id, чтение тегов; сканер, SQLite, поиск — позже"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,6 +9,10 @@ publish.workspace = true
 [dependencies]
 player-domain.workspace = true
 player-ports.workspace = true
+lofty.workspace = true
+
+[dev-dependencies]
+player-testkit.workspace = true
 
 [lints]
 workspace = true
