@@ -1,6 +1,6 @@
 # Scrobb — архитектура веб-приложения (этап 1)
 
-> Статус: **черновик-предложение** (03.10.2026). Решения по стеку и модели данных обсуждаемы, см. «Открытые вопросы».
+> Статус: **черновик-предложение** (03.10.2026; стек и версии обновлены 07.10.2026 по [ревью](review.md), §2). Решения по стеку и модели данных обсуждаемы, см. «Открытые вопросы».
 > Исследование сервисов РФ: [music-services-ru.md](music-services-ru.md). Пометка **(не проверено)** — факт не подтверждён первоисточником.
 
 ## 0. Вводные и ключевые ограничения
@@ -26,11 +26,11 @@
 | **Клиенты-скробблеры** | **Свои** (предложение, §18): расширение браузера (TypeScript, Manifest V3) и десктоп-приложение (Tauri 2) — основной путь, родной API и привязка устройства. **Сторонние** (§3.3): ListenBrainz- и Last.fm 2.0-совместимые клиенты по API-токену |
 | **Frontend** (Next.js, SSR + клиентская интерактивность) | Публичные профили (SSR ради шаринга и SEO), личный кабинет, статистика и графики, стрики, достижения, друзья, настройки приватности. Работает только через Backend API |
 | **Backend API** (модульный монолит) | REST/JSON + OpenAPI. Модули: `auth`, `users/profiles`, `library` (артисты/альбомы/треки), `listens` (история), `stats`, `social` (подписки, приватность, лидерборды), `gamification` (стрики, достижения), `ingest` (Scrobble API: родной и совместимые протоколы, токены клиентов и привязка устройств, §3, §18), `integrations` (импорт и привязка внешних аккаунтов), `notifications`, `email` (адреса, одноразовые ссылки, сессии, отправка писем, §17), `media` (аватары/баннеры), `settings` (`user_preferences`), `billing` (донаты, Pro, §12), позже `recommendations`. Единая политика доступа (privacy guard) |
-| **Integration layer** | Провайдеры источников: **основной — push-приём от клиентов** (`PushScrobbleProvider`, §3), дополнительный — `LastFmProvider` (импорт и опциональная синхронизация, §4), позже Yandex/VK/Zvuk. Нормализация в `ListenEvent`, сопоставление с каноническими треками (matcher), клиенты Last.fm и MusicBrainz с rate limiter |
-| **Background workers + scheduler** | Разбор больших пакетов `import` от клиентов, импорт и опциональная синхронизация Last.fm (backfill/incremental/reconcile), обогащение метаданных, агрегаты (daily_activity, месячные rollup'ы), обработчики геймификации, пересчёт лидербордов, снапшоты топов и отчёты (§9), доставка уведомлений, обработка изображений, позже ночные рекомендации |
-| **Storage** | PostgreSQL — источник истины, `listens` секционированы по времени. Valkey (два экземпляра — очередь и кэш, §7.1) — очередь задач, лимиты частоты (токены клиентов, Last.fm, MusicBrainz), кэш, горячие лидерборды (sorted sets), now playing с TTL. Объектное хранилище S3 в РФ — аватары и баннеры, выгрузки данных |
+| **Integration layer** | Провайдеры источников: **основной — push-приём от клиентов** (`PushScrobbleProvider`, §3), дополнительный — `LastFmProvider` (импорт и опциональная синхронизация, §4), позже Yandex/VK/Zvuk. Нормализация в `ListenEvent`, сопоставление с каноническими треками (matcher) по локальной копии core-данных MusicBrainz (§6.1), клиенты Last.fm и MusicBrainz API с rate limiter |
+| **Background workers** (с периодическими задачами procrastinate вместо отдельного планировщика, §6.3) | Разбор больших пакетов `import` от клиентов, импорт и опциональная синхронизация Last.fm (backfill/incremental/reconcile), обогащение метаданных, агрегаты (daily_activity, месячные rollup'ы), обработчики геймификации, пересчёт лидербордов, снапшоты топов и отчёты (§9), доставка уведомлений, обработка изображений, позже ночные рекомендации |
+| **Storage** | PostgreSQL 18 — источник истины, `listens` секционированы по времени; там же очередь задач (procrastinate, §6.3) и локальная копия core-данных MusicBrainz (§6.1). Valkey (один экземпляр, §7.1) — лимиты частоты (токены клиентов, Last.fm, MusicBrainz API), кэш, горячие лидерборды (sorted sets), now playing с TTL. Объектное хранилище S3 в РФ — аватары и баннеры, выгрузки данных |
 
-Внутренние события через **transactional outbox**: событие пишется в таблицу `outbox` в той же транзакции, что и данные, а воркер-диспетчер раздаёт его обработчикам. Это даёт «at-least-once» доставку, поэтому все обработчики идемпотентны.
+Внутренние события через **transactional outbox**, роль которого играет сама очередь: procrastinate хранит задачи в той же PostgreSQL, поэтому событие ставится задачей в **той же транзакции**, что и данные (`configure(connection=…)`, §6.3). Отдельная таблица `outbox` и воркер-диспетчер не нужны. Ниже «записать событие в outbox» означает именно такую постановку задачи. Это даёт «at-least-once» доставку, поэтому все обработчики идемпотентны.
 
 ```mermaid
 ---
@@ -46,23 +46,23 @@ flowchart LR
     TGU["Telegram"]
   end
 
-  subgraph BE["Бэкенд — модульный монолит (FastAPI); процессы api · worker · scheduler · bot"]
+  subgraph BE["Бэкенд — модульный монолит (FastAPI); процессы api · worker · bot"]
     ING["api · Ingest — основной вход:<br/>родной API (§18.3) + ListenBrainz- и Last.fm 2.0-совм. (§3)"]
     CORE["api · auth (VK ID / Яндекс ID / телефон, устройства §18.4),<br/>profiles · listens · stats · social · gamification"]
     BILL["api · billing: донаты · Pro · entitlements (§12)"]
     NOTIF["api · notifications · email · settings · media"]
     BOT["bot · aiogram 3, webhook (§13)"]
     INT["Integration layer (§5): Normalizer + Matcher,<br/>Provider registry (LastFmProvider; Yandex / VK / Zvuk — позже)"]
-    SYNC["worker · scheduler + импорт и опц. sync Last.fm"]
-    ENR["worker · обогащение (MusicBrainz, Last.fm *.getInfo)"]
-    AGG["worker · агрегаты, стрики, достижения,<br/>лидерборды, топы и отчёты (обработчики outbox)"]
+    SYNC["worker · периодические задачи + импорт и опц. sync Last.fm"]
+    ENR["worker · обогащение (локальная копия MusicBrainz;<br/>API MusicBrainz и Last.fm *.getInfo — запасной путь)"]
+    AGG["worker · агрегаты, стрики, достижения,<br/>лидерборды, топы и отчёты (обработчики событий)"]
     DLV["worker · доставка уведомлений: in-app, Telegram, email"]
     MED["worker · изображения, PNG-карточки"]
   end
 
   subgraph DATA["Данные (РФ)"]
-    PG[("PostgreSQL<br/>listens по месяцам · outbox")]
-    RD[("Valkey<br/>очередь · кэш · лимиты · ZSET · now playing")]
+    PG[("PostgreSQL 18<br/>listens по месяцам · очередь procrastinate ·<br/>копия MusicBrainz")]
+    RD[("Valkey<br/>кэш · лимиты · ZSET · now playing")]
     S3[("S3 (РФ)")]
   end
 
@@ -82,10 +82,10 @@ flowchart LR
   BOT -- "внутренний API" --> CORE
   ING --> INT
   SYNC --> INT
-  ING -- "listens · outbox" --> PG
+  ING -- "listens + задача-событие (одна транзакция)" --> PG
   ING -- "now playing" --> RD
   CORE --> PG
-  PG -- "outbox → задачи" --> AGG
+  PG -- "задачи procrastinate" --> AGG
   AGG --> PG
   AGG -- "ZSET" --> RD
   AGG -- "StreakAtRisk · AchievementUnlocked" --> DLV
@@ -438,14 +438,6 @@ erDiagram
     citext name PK
     text reason
   }
-  outbox {
-    bigint id PK
-    text event
-    bigint aggregate_id "обычно user_id"
-    jsonb payload
-    timestamptz created_at
-    timestamptz dispatched_at
-  }
   jobs_dead {
     bigint id PK
     text name
@@ -559,7 +551,7 @@ erDiagram
   }
 ```
 
-### 2.3 DDL-эскиз ключевых таблиц (PostgreSQL 16+)
+### 2.3 DDL-эскиз ключевых таблиц (PostgreSQL 18)
 
 **Коды `entity_type`** — `smallint`, одни и те же во всех таблицах (`external_ids`, `entity_tags`, `favorites`, `user_entity_totals`, `user_entity_monthly`, `user_top_snapshots`, `recommendation_items`, `recommendation_feedback`):
 
@@ -638,7 +630,8 @@ CREATE TABLE listens (
   ingested_at timestamptz NOT NULL DEFAULT now(),
   PRIMARY KEY (user_id, played_at, alias_id) -- ключ дедупликации, включает ключ секционирования
 ) PARTITION BY RANGE (played_at);
--- Месячные секции (pg_partman или своя задача), отдельная секция для «древних» дат.
+-- Секции создаёт своя периодическая задача partitions.ensure (без pg_partman, §6.1): месячные — с года запуска
+-- и на 3 месяца вперёд, годовые — для исторических импортов (с 2002 года, LISTEN_MINIMUM_TS). DEFAULT-секции нет.
 CREATE INDEX ON listens (user_id, track_id);
 -- (user_id, played_at) покрывается префиксом PK: этого хватает и для окна дедупликации ±N с (§5.4).
 
@@ -672,7 +665,7 @@ CREATE TABLE ingest_batches (
   processed_at  timestamptz
 );
 CREATE INDEX ON ingest_batches (status, created_at) WHERE status IN ('queued', 'processing');
--- После рестарта планировщик заново ставит в очередь queued/processing (§7.2).
+-- Задача ingest_batch:{id} ставится в той же транзакции, что и строка (§6.3), поэтому не теряется при рестарте.
 
 CREATE TABLE daily_activity (
   user_id         bigint NOT NULL,
@@ -713,20 +706,12 @@ CREATE TABLE user_entity_monthly (
   PRIMARY KEY (user_id, month, entity_type, entity_id)
 );
 
--- Transactional outbox (§1): событие пишется в той же транзакции, что и данные.
-CREATE TABLE outbox (
-  id            bigserial PRIMARY KEY,
-  event         text  NOT NULL,           -- 'ListensImported', 'StreakUpdated', 'AchievementUnlocked', …
-  aggregate_id  bigint,                   -- обычно user_id: порядок событий одного пользователя
-  payload       jsonb NOT NULL,
-  created_at    timestamptz NOT NULL DEFAULT now(),
-  dispatched_at timestamptz               -- NULL = ещё не роздано обработчикам
-);
-CREATE INDEX ON outbox (id) WHERE dispatched_at IS NULL;
--- Диспетчер: SELECT … WHERE dispatched_at IS NULL ORDER BY id LIMIT 500 FOR UPDATE SKIP LOCKED → enqueue → dispatched_at = now().
--- Розданные события старше 7 дней удаляются фоновой задачей.
+-- Transactional outbox (§1): отдельной таблицы нет. Событие ('ListensImported', 'StreakUpdated', 'AchievementUnlocked', …)
+-- ставится задачей procrastinate в той же транзакции, что и данные: task.configure(connection=conn).defer_async(**payload).
+-- Таблицы очереди (procrastinate_jobs и др.) создаёт миграция procrastinate, а не наши DDL.
 
--- Dead-letter интерфейса jobs (§6.3, §11.6): не зависит от брокера очереди.
+-- Dead-letter интерфейса jobs (§6.3, §11.6): не зависит от брокера очереди. procrastinate и сам хранит упавшие задачи
+-- (status = 'failed'); jobs_dead — общий журнал для любого бэкенда и кнопка «перезапустить» в админке.
 CREATE TABLE jobs_dead (
   id          bigserial PRIMARY KEY,
   name        text  NOT NULL,             -- 'sync', 'enrich', 'ingest_batch', 'billing.apply', …
@@ -966,7 +951,7 @@ stateDiagram-v2
   backoff --> incremental
 ```
 
-- **Задачи по пользователю.** Одна активная sync-задача на `account_id` (Valkey-лок/уникальный job id), чтобы не было гонок. Планировщик раз в минуту выбирает `sync_state WHERE next_run_at <= now()` и ставит задачи в очередь. Отдельные очереди с приоритетами: `incremental` > `backfill` > `enrich`, чтобы большой backfill не блокировал обновления у остальных.
+- **Задачи по пользователю.** Одна активная sync-задача на `account_id` (`queueing_lock` + `lock` procrastinate, §6.3), чтобы не было гонок. Планировщик раз в минуту выбирает `sync_state WHERE next_run_at <= now()` и ставит задачи в очередь. Отдельные очереди с приоритетами: `incremental` > `backfill` > `enrich`, чтобы большой backfill не блокировал обновления у остальных.
 - **Backfill (возобновляемый, от новых к старым).** При старте фиксируем `backfill_to_uts = now()`, затем `getRecentTracks(limit=200, to=backfill_to_uts, page=p)` для `p = backfill_page+1 … totalPages`. Фиксированный `to` не даёт страницам «съезжать» от новых скробблов. После коммита страницы сохраняем `backfill_page = p`, и после падения работа продолжается с этого места. Удаление скробблов во время backfill может сдвинуть страницу на несколько элементов: это закрывается идемпотентной записью и перечитыванием одной предыдущей страницы при возобновлении. Новые к старым — потому что пользователь сразу видит свежую статистику. Геймификацию за прошлое начисляем один раз, когда backfill завершён (§8.2).
 - **Incremental** (только при включённой синхронизации, `sync_enabled = true`). `getRecentTracks(from=last_synced_uts, limit=200)`, листаем страницы до конца. Включается ли граница `from` — **не проверено**, поэтому берём её с нахлёстом и полагаемся на идемпотентность. `last_synced_uts = max(uts)` обновляется **после** коммита. Опрос адаптивный: недавно активные (now playing или скробблы за последний час) — каждые 3–5 минут; прочие — каждые 30–60 минут; неактивные больше 30 дней — раз в сутки; плюс кнопка «Обновить сейчас» с rate limit.
 - **Reconcile (поздние, удалённые и отредактированные скробблы).** Клиенты отправляют кэшированные скробблы с прошлыми timestamp'ами (Last.fm отбрасывает слишком старые — код «Timestamp too far in the past» в [scrobbling docs](https://www.last.fm/api/scrobbling); точное окно, по распространённому мнению около 14 дней, **не проверено**). Такие скробблы `from=last_synced_uts` пропустит. Поэтому раз в сутки перечитываем окно **последних 14 дней** `[now-14d, last_synced_uts]`: недостающее добавляем, а то, чего в Last.fm больше нет, мягко удаляем (`deleted_at`). Затронутые даты пересчитываем. Возможность редактировать скробблы (Last.fm Pro) — **не проверено**; для нас правка выглядит как удаление + новая запись.
@@ -1078,14 +1063,15 @@ class ProviderRegistry:
 
 | Часть | Выбор | Почему |
 |---|---|---|
-| Язык / бэкенд | **Python 3.12 + FastAPI**, Pydantic v2, SQLAlchemy 2 (async) + Alembic | Асинхронный I/O под много мелких запросов приёма скробблов и под импорт из внешних API; OpenAPI из коробки → сгенерированный TS-клиент для фронта. Главное: неофициальные библиотеки будущих провайдеров **на Python** ([yandex-music](https://ym.marshal.dev/) с Ynison, [zvuk-music](https://pypi.org/project/zvuk-music/)), и их можно подключить без отдельного сервиса |
-| Очередь / планировщик | **arq** (asyncio-очередь по протоколу Redis — работает на Valkey, cron-задачи, уникальные job id) | Легче Celery, один процесс-воркер, тот же async-код. **Важно:** arq с октября 2025 года в режиме поддержки — только критические исправления ([issue #510](https://github.com/python-arq/arq/issues/510)). Поэтому задачи прячем за тонкий внутренний интерфейс (см. §6.3) и до продакшена выбираем замену: Dramatiq, SAQ или procrastinate (очередь на Postgres) |
-| БД | **PostgreSQL 16** с декларативным секционированием `listens` по месяцам (pg_partman), `pg_trgm`, `citext` | Один движок для OLTP и агрегатов, оконные функции для стриков (gaps-and-islands), `ON CONFLICT` для идемпотентности. TimescaleDB — опция позже |
-| Кэш / лидерборды / rate limit / брокер | **Valkey** — два экземпляра: очередь и кэш (§7.1) | Token bucket для лимитов на токены клиентов (§11.1), Last.fm и MusicBrainz (у MusicBrainz жёстко ≤1 req/s с IP и обязательный User-Agent, [rate limiting](https://musicbrainz.org/doc/MusicBrainz_API/Rate_Limiting)), sorted sets для лидербордов, now playing с TTL, брокер очереди. **Почему Valkey, а не Redis:** в 2024 году Redis сменил лицензию BSD на RSALv2 / SSPLv1 (с версии 7.4, [анонс](https://redis.io/blog/redis-adopts-dual-source-available-licensing/)), в Redis 8 добавлен вариант AGPLv3 ([анонс](https://redis.io/blog/agplv3/)). Valkey — форк Redis под эгидой Linux Foundation, лицензия BSD 3-Clause, совместимый протокол ([Linux Foundation](https://www.linuxfoundation.org/press/linux-foundation-launches-open-source-valkey-community), [valkey.io](https://valkey.io/)); подробнее — §6.3 |
+| Язык / бэкенд | **Python 3.14 + FastAPI**, Pydantic v2, SQLAlchemy 2 (async, драйвер **psycopg 3**) + Alembic | **Версия:** 3.14 — единственная ветка, которая ещё получает исправления ошибок (bugfix до осени 2027, security до 10.2030); 3.12 и 3.13 уже только security, 3.15 выходит в октябре 2026 — переходим, когда зависимости выпустят колёса ([devguide](https://devguide.python.org/versions/), на 07.10.2026). **Драйвер psycopg 3** — тот же, что у очереди, поэтому задачу можно поставить в транзакции приложения (§6.3). Асинхронный I/O под много мелких запросов приёма скробблов и под импорт из внешних API; OpenAPI из коробки → сгенерированный TS-клиент для фронта. Главное: неофициальные библиотеки будущих провайдеров **на Python** ([yandex-music](https://ym.marshal.dev/) с Ynison, [zvuk-music](https://pypi.org/project/zvuk-music/)), и их можно подключить без отдельного сервиса |
+| Очередь / планировщик | **procrastinate** — очередь в той же PostgreSQL (MIT, asyncio, [docs](https://procrastinate.readthedocs.io/)), за тонким интерфейсом `jobs` (§6.3) | Блокировки на задачу (одна синхронизация на аккаунт), приоритеты, повторы с backoff, периодические задачи без отдельного процесса-планировщика, постановка задачи **в транзакции приложения** — outbox без своей таблицы (§1). Убирает отдельный экземпляр Valkey под очередь с AOF; очередь попадает в бэкапы БД. **arq не используем:** с октября 2025 года он в режиме поддержки, только критические исправления ([issue #510](https://github.com/python-arq/arq/issues/510)) |
+| БД | **PostgreSQL 18** с декларативным секционированием `listens` (секции создаёт своя периодическая задача, без pg_partman, §2.3), `pg_trgm`, `citext` | Один движок для OLTP и агрегатов, оконные функции для стриков (gaps-and-islands), `ON CONFLICT` для идемпотентности. **Версия 18** (25.09.2025): skip scan по составным B-tree индексам (запросы, где не задан префикс индекса), асинхронный I/O для последовательного чтения и VACUUM, встроенный `uuidv7()` ([анонс](https://www.postgresql.org/about/news/postgresql-18-released-3142/)). В Yandex Managed Service for PostgreSQL версия 18 уже есть ([docs](https://yandex.cloud/en/docs/managed-postgresql/)), у остальных провайдеров из списка — проверить; запасной вариант — 17. **pg_partman не берём:** в официальном Docker-образе `postgres` его нет (CI, [ci-cd.md](ci-cd.md)), наличие у managed-провайдеров не проверено, а создание секций на месяцы вперёд — короткая идемпотентная задача. TimescaleDB — опция позже |
+| Кэш / лидерборды / rate limit | **Valkey 9** — один экземпляр, `allkeys-lru` (§7.1) | Token bucket для лимитов на токены клиентов (§11.1), Last.fm и MusicBrainz API (у MusicBrainz жёстко ≤1 req/s с IP и обязательный User-Agent, [rate limiting](https://musicbrainz.org/doc/MusicBrainz_API/Rate_Limiting)), sorted sets для лидербордов, now playing с TTL, FSM-диалоги бота. Всё, что в нём лежит, можно потерять: лимиты обнулятся, кэш и лидерборды пересоберутся из PostgreSQL. Очереди в Valkey больше нет. **Почему Valkey, а не Redis:** в 2024 году Redis сменил лицензию BSD на RSALv2 / SSPLv1 (с версии 7.4, [анонс](https://redis.io/blog/redis-adopts-dual-source-available-licensing/)), в Redis 8 добавлен вариант AGPLv3 ([анонс](https://redis.io/blog/agplv3/)). Valkey — форк Redis под эгидой Linux Foundation, лицензия BSD 3-Clause, совместимый протокол ([Linux Foundation](https://www.linuxfoundation.org/press/linux-foundation-launches-open-source-valkey-community), [valkey.io](https://valkey.io/)); подробнее — §6.3 |
+| Справочник метаданных | **Локальная копия core-данных MusicBrainz** (CC0) из полного дампа: только нужные таблицы (артисты и artist credits, записи, релизы и группы релизов, треклисты, ISRC, URL-связи) в отдельной схеме `mb`. Обновление — из свежего дампа (выходят дважды в неделю) фоновой задачей | API MusicBrainz ограничен 1 запросом в секунду: по оценке §7.3 у 1 000 пользователей 1–2 млн уникальных алиасов, то есть 12–23 дня очереди обогащения. Локальная копия снимает лимит; API остаётся для того, что новее дампа. Ограничения: (1) **теги и жанровые метки** — supplementary data под CC BY-NC-SA 3.0, а не CC0 ([MusicBrainz Database](https://musicbrainz.org/doc/MusicBrainz_Database)); при Pro это, вероятно, коммерческое использование — вопрос к MetaBrainz (§16, п. 46); (2) ежечасная репликация (Live Data Feed) требует токен MetaBrainz, бесплатный — для некоммерческого использования, коммерческих пользователей MetaBrainz просит поддержать проект ([Live Data Feed](https://musicbrainz.org/doc/Live_Data_Feed)); (3) полное зеркало (musicbrainz-docker без поиска — 100 ГБ диска и 4 ГБ RAM, [README](https://github.com/metabrainz/musicbrainz-docker)) на основной VPS не ставим; размер выборки — замерить при первом импорте (**не проверено**). Русскоязычный каталог в MusicBrainz покрыт слабо: длительность и альбом берём и от своих клиентов (§18.3) |
 | Фронтенд | **Next.js (App Router, TypeScript)**, TanStack Query, графики — ECharts или Recharts, UI — Tailwind + shadcn/ui | SSR для публичных профилей (превью ссылок, SEO), большая экосистема. Tailwind и shadcn/ui настраиваются на дизайн-токены (CSS-переменные) из §10, цвета серий графиков берутся из тех же токенов |
 | Свои клиенты-скробблеры (§18.12, предложение) | Расширение: **TypeScript + WebExtension Manifest V3**, сборка WXT, Chrome/Chromium и Firefox. Десктоп: **Tauri 2** (Rust: SMTC через `windows`, MPRIS через `mpris`, macOS через mediaremote-adapter), общее ядро `scrobbler-core` на TypeScript; альтернатива — Electron | Тот же TypeScript, что во фронтенде, API-клиент из OpenAPI; маленький установщик и подписанные обновления у Tauri |
 | Авторизация | Свои сессии (httpOnly cookie, `user_sessions`, §17.4) + OAuth-клиенты **VK ID** (OAuth 2.1 + PKCE, [docs](https://id.vk.com/about/business/go/docs/ru/vkid/latest/vk-id/connection/start-integration/auth-without-sdk/auth-without-sdk-web)), **Яндекс ID** ([docs](https://yandex.com/dev/id/doc/ru/register-auth)), вход по телефону (SMS-провайдер РФ) | Соответствует 149-ФЗ ст. 8 ч. 10 (R3). Telegram — только как канал уведомлений, не для входа. Email — канал связи; вход по email и паролю (argon2id) — только под флагом после ответа юриста (§17.1) |
-| Деплой | **Docker Compose** на VPS или в облаке **в РФ** (Selectel / Yandex Cloud / VK Cloud / Timeweb — выбрать). Сервисы: `api`, `worker`, `scheduler`, `web`, `bot` (Telegram, §13), `postgres`, `valkey` (два экземпляра — очередь и кэш, §7.1), `caddy` (TLS). Опционально — egress-прокси за пределами РФ только для `ws.audioscrobbler.com` (R1/R4) | Один человек поднимет всё за вечер. Managed PostgreSQL у того же провайдера снимает бэкапы и PITR |
+| Деплой | **Docker Compose** на VPS или в облаке **в РФ** (Selectel / Yandex Cloud / VK Cloud / Timeweb — выбрать). Сервисы: `api`, `worker` (с периодическими задачами, отдельного `scheduler` нет, §6.3), `web`, `bot` (Telegram, §13), `postgres` (данные и очередь), `valkey` (один экземпляр — кэш, §7.1), `caddy` (TLS). Опционально — egress-прокси за пределами РФ только для `ws.audioscrobbler.com` (R1/R4) | Один человек поднимет всё за вечер. Managed PostgreSQL у того же провайдера снимает бэкапы и PITR |
 | CI/CD | **GitHub Actions**: lint (ruff, eslint), тесты (pytest + testcontainers-postgres), сборка образов → GHCR → деплой по SSH (`docker compose pull && up -d`), миграции Alembic отдельным шагом | Доступен в репозитории уже сейчас |
 | Наблюдаемость | Структурные JSON-логи; Prometheus-метрики (латентность и доля `5xx` приёма скробблов, «замолчавшие» токены, глубина очередей; для импорта Last.fm — лаг синхронизации, частота ошибок `29` и `17`, запросов в секунду к Last.fm; полный список — §7.4) + Grafana; ошибки — **self-hosted GlitchTip** (Sentry-совместимый). SaaS-Sentry — это передача ПДн за рубеж (R4); uptime-проверки | Главный риск — тихо сломавшийся приём или импорт, отсюда алерты на `5xx` приёма (> 0,5%) и «лаг > 1 ч у >5% аккаунтов» с синхронизацией (§7.4) |
 
@@ -1098,11 +1084,21 @@ class ProviderRegistry:
 | **Django + HTMX** (+ Celery) монолит | Самый быстрый путь к MVP: админка, auth, ORM, миграции из коробки | Интерактивные графики и сравнения на HTMX сложнее; меньше async (I/O-воркеры на Celery) |
 
 
-### 6.3 Очереди задач и Valkey: риски зависимостей
+### 6.3 Очередь задач и Valkey: выбор и риски зависимостей
 
-- **Тонкий интерфейс задач.** Код приложения не импортирует arq напрямую. Вместо этого — внутренний модуль `jobs` с двумя-тремя функциями (`enqueue(name, payload, *, unique_key=None, queue="default", defer_until=None)`, регистрация обработчиков и cron-расписаний). Обработчики — обычные async-функции без зависимости от конкретной очереди. Тогда замена arq на Dramatiq, SAQ или procrastinate сводится к новому адаптеру и не трогает синхронизацию, агрегаторы и геймификацию.
-- **Выбор замены до продакшена.** Критерии: уникальные задачи (одна синхронизация на аккаунт), приоритетные очереди (`incremental` > `backfill` > `enrich`), cron, повторы с backoff, поддержка asyncio, активная разработка. procrastinate интересен тем, что живёт в PostgreSQL и убирает зависимость очереди от Valkey.
-- **Почему Valkey, а не Redis.** 20.03.2024 Redis объявил переход с BSD 3-Clause на RSALv2 / SSPLv1 начиная с версии 7.4 ([анонс](https://redis.io/blog/redis-adopts-dual-source-available-licensing/)); в Redis 8 добавлен третий вариант — AGPLv3 ([анонс](https://redis.io/blog/agplv3/)). RSALv2 и SSPLv1 не являются OSI-лицензиями, а AGPLv3 — сильный копилефт: это лишние юридические вопросы (политика хостинга, проверка лицензий). **Valkey** — форк Redis 7.2.4, созданный в марте 2024 года под эгидой Linux Foundation, лицензия BSD 3-Clause, протокол и команды совместимы ([Linux Foundation](https://www.linuxfoundation.org/press/linux-foundation-launches-open-source-valkey-community), [лицензия](https://github.com/valkey-io/valkey/blob/unstable/COPYING)). Клиенты, говорящие на протоколе Redis (redis-py, через него arq и FSM-хранилище aiogram), подключаются к Valkey без изменений кода; это подтверждаем интеграционными тестами в CI на образе Valkey (**не проверено** на нашей связке). Экземпляров два — очередь и кэш (§7.1).
+- **Тонкий интерфейс задач.** Код приложения не импортирует библиотеку очереди напрямую. Вместо этого — внутренний модуль `jobs` с двумя-тремя функциями (`enqueue(name, payload, *, unique_key=None, queue="default", priority=0, defer_until=None, connection=None)`, регистрация обработчиков и периодических задач). Обработчики — обычные async-функции без зависимости от конкретной очереди. Тогда смена бэкенда сводится к новому адаптеру и не трогает синхронизацию, агрегаторы и геймификацию.
+- **Выбор — procrastinate** (решение по [ревью](review.md) от 07.10.2026; на момент выбора версия 3.10.0 от 23.09.2026, [PyPI](https://pypi.org/project/procrastinate/)). Как он закрывает прежние критерии:
+  - **уникальные задачи:** `queueing_lock` — не больше одной задачи в очереди на ключ (например, `sync:{account_id}`), `lock` — не больше одной выполняемой;
+  - **приоритеты:** поле `priority` (задачи с большим приоритетом берутся первыми) — `incremental` > `backfill` > `enrich`; плюс разные очереди для разных воркеров (§7.5);
+  - **cron:** `@app.periodic(cron=…)`. Периодические задачи ставят сами воркеры, а база гарантирует одну постановку за период даже при нескольких воркерах. Поэтому отдельного процесса `scheduler` нет; ниже «планировщик» — это периодические задачи. Если не запущен ни один воркер, периодические задачи не ставятся: это ловит healthcheck воркера и алерт §7.4;
+  - **повторы с backoff:** параметр `retry` (стратегия с экспоненциальной задержкой);
+  - **asyncio:** нативно, `PsycopgConnector` (psycopg 3);
+  - **постановка в транзакции приложения:** параметр `connection` у `configure()` — INSERT задачи идёт в соединении приложения и коммитится вместе с данными. Поэтому SQLAlchemy работает на том же драйвере psycopg 3, а отдельный outbox не нужен (§1).
+
+  Возможности сверены с [документацией](https://procrastinate.readthedocs.io/en/stable/reference.html) 07.10.2026. Работу на нашей связке (SQLAlchemy async + psycopg 3 + `connection=…`) — **не проверено**, это первый спайк.
+- **Цена решения.** Очередь нагружает основную БД: вставки задач, выборка с `SELECT … FOR UPDATE SKIP LOCKED`, LISTEN/NOTIFY. На объёмах этапа 1 это мало по сравнению с приёмом в `listens` (**оценка**). Выполненные задачи удаляет периодическая задача (хранение 7 дней). Если очередь начнёт мешать (сигналы — §7.4), она переезжает в отдельную базу (`JOBS_DATABASE_URL`, тогда без постановки в транзакции приложения) или на другой бэкенд через интерфейс `jobs`.
+- **Почему не arq.** С 18.10.2025 arq в режиме maintenance-only ([issue #510](https://github.com/python-arq/arq/issues/510)). Dramatiq, SAQ и Taskiq остаются запасными вариантами; постановку задачи в транзакции приложения из коробки мы проверили только у procrastinate.
+- **Почему Valkey, а не Redis.** 20.03.2024 Redis объявил переход с BSD 3-Clause на RSALv2 / SSPLv1 начиная с версии 7.4 ([анонс](https://redis.io/blog/redis-adopts-dual-source-available-licensing/)); в Redis 8 добавлен третий вариант — AGPLv3 ([анонс](https://redis.io/blog/agplv3/)). RSALv2 и SSPLv1 не являются OSI-лицензиями, а AGPLv3 — сильный копилефт: это лишние юридические вопросы (политика хостинга, проверка лицензий). **Valkey** — форк Redis 7.2.4, созданный в марте 2024 года под эгидой Linux Foundation, лицензия BSD 3-Clause, протокол и команды совместимы ([Linux Foundation](https://www.linuxfoundation.org/press/linux-foundation-launches-open-source-valkey-community), [лицензия](https://github.com/valkey-io/valkey/blob/unstable/COPYING)); актуальная ветка — 9.0 (GA в октябре 2025). Клиенты, говорящие на протоколе Redis (redis-py и FSM-хранилище aiogram), подключаются к Valkey без изменений кода; это подтверждаем интеграционными тестами в CI на образе Valkey (**не проверено** на нашей связке). Экземпляр один — кэш (§7.1).
 
 ---
 
@@ -1120,52 +1116,50 @@ flowchart LR
     CADDY["caddy (TLS, reverse proxy)"]
     WEB["web (Next.js SSR)"]
     API["api (FastAPI, uvicorn)"]
-    WRK["worker (очереди: ingest_batch, aggregate, backfill, incremental, enrich)"]
-    SCH["scheduler (1 экземпляр)"]
+    WRK["worker (очереди: ingest_batch, aggregate, backfill, incremental, enrich;<br/>периодические задачи procrastinate)"]
     BOTS["bot (Telegram webhook, §13)"]
-    PG[("PostgreSQL")]
-    RQ[("Valkey: очередь<br/>noeviction + AOF")]
-    RC[("Valkey: кэш<br/>allkeys-lru")]
+    PG[("PostgreSQL 18<br/>данные · очередь procrastinate · схема mb")]
+    RC[("Valkey: кэш, лимиты, ZSET<br/>allkeys-lru")]
     MON["node / postgres / valkey exporters"]
     CADDY --> WEB --> API
     CADDY --> API
     API --> PG
     API --> RC
-    API --> RQ
-    SCH --> RQ --> WRK
+    PG -- "задачи (LISTEN/NOTIFY)" --> WRK
     CADDY -- "/tg/webhook" --> BOTS --> API
     WRK --> PG
     WRK --> RC
   end
-  WRK --> EXT[["Last.fm — только импорт/опц. sync (через egress, R1) · MusicBrainz"]]
+  WRK --> EXT[["Last.fm — только импорт/опц. sync (через egress, R1) ·<br/>MusicBrainz: дампы (дважды в неделю) и API для нового"]]
   PG -. "WAL + ежесуточный dump" .-> S3[("S3 в РФ: бэкапы, аватары")]
   MON -.-> GRAF["Prometheus/VictoriaMetrics + Grafana<br/>(отдельный мини-VPS)"]
 ```
 
-**Очередь и кэш — два экземпляра Valkey** (или как минимум разные политики вытеснения). Политика вытеснения задаётся на весь экземпляр. Кэшу нужна `allkeys-lru`, а очередь при вытеснении **теряет задачи**, поэтому ей нужна `noeviction` с AOF `everysec`. Лидерборды можно восстановить из SQL (§11.7), поэтому они живут в кэш-экземпляре.
+**Valkey — один экземпляр с `allkeys-lru`.** Очередь живёт в PostgreSQL (§6.3), поэтому экземпляр с `noeviction` и AOF не нужен. В Valkey остаётся только то, что можно потерять: кэш, лимиты частоты, now playing, FSM-диалоги бота и лидерборды (их можно восстановить из SQL, §11.7).
 
 **Бюджет памяти (оценка для 8 GB; для 4 GB значения в скобках):**
 
 | Сервис | RAM | Заметки |
 |---|---|---|
 | PostgreSQL | 2,5–3 GB (1,5 GB) | `shared_buffers` = 2 GB (1 GB), `work_mem` 16 MB, `maintenance_work_mem` 256 MB, `effective_cache_size` 4 GB (2 GB), `max_connections` 100 |
-| Valkey-очередь | 128–256 MB | `maxmemory` 256 MB, `noeviction` |
-| Valkey-кэш | 256–512 MB (256 MB) | `allkeys-lru` |
+| Valkey | 256–512 MB (256 MB) | `allkeys-lru` |
 | api | 0,5–1 GB (0,4 GB) | 2–4 uvicorn-воркера × ~150–250 MB |
 | web (Next.js) | 300–500 MB | |
 | worker | 0,4–0,6 GB (0,3 GB) | 1–2 процесса, async-конкурентность 20–50 задач |
-| scheduler, bot | ~100 MB каждый | |
+| bot | ~100 MB | |
 | caddy + exporters | ~150 MB | |
 | ОС + page cache | остаток, ≥1,5 GB (≥0,8 GB) | Page cache важен для PostgreSQL |
+
+Схема `mb` (копия MusicBrainz, §6.1) занимает диск и page cache основной БД; если по замеру она не помещается в бюджет диска и памяти, её выносят в отдельную базу на втором сервере (matcher ходит в неё только на чтение).
 
 Prometheus, Grafana и GlitchTip (это ещё один PostgreSQL) лучше вынести на отдельный мини-VPS за 1–2 GB, чтобы мониторинг не падал вместе с основным сервером и не съедал его память.
 
 ### 7.2 Бэкапы
 
 - **WAL-архив + базовые бэкапы** (WAL-G или pgBackRest) в S3-хранилище **в РФ**, `archive_timeout = 60s` → восстановление на момент времени (PITR), RPO ≈ 1–5 мин.
-- **Ежесуточный `pg_dump -Fc`** — второй, логический уровень защиты, в отдельный бакет. Хранение: 7 ежедневных, 4 еженедельных, 6 ежемесячных копий. Шифрование на стороне клиента.
+- **Ежесуточный `pg_dump -Fc`** — второй, логический уровень защиты, в отдельный бакет; без схемы `mb` (`--exclude-schema=mb`: она восстанавливается из дампа MusicBrainz). Хранение: 7 ежедневных, 4 еженедельных, 6 ежемесячных копий. Шифрование на стороне клиента.
 - **Ежемесячная проверка восстановления** на временном VPS (скрипт в CI по расписанию): поднять, применить, сверить `count(*)` по ключевым таблицам.
-- Valkey не бэкапим: очередь пересобирается планировщиком из `sync_state.next_run_at` и `ingest_batches.status`, кэш и лидерборды — из PostgreSQL, now playing просто истекает. На S3-бакете аватаров включено версионирование.
+- Очередь задач лежит в PostgreSQL и попадает в те же бэкапы. Valkey не бэкапим: кэш и лидерборды пересобираются из PostgreSQL, лимиты обнуляются, now playing просто истекает. На S3-бакете аватаров включено версионирование.
 - С managed PostgreSQL бэкапы и PITR делает провайдер, свою проверку восстановления всё равно оставляем.
 
 ### 7.3 Оценка объёма хранения (оценка, не измерено)
@@ -1187,6 +1181,8 @@ Prometheus, Grafana и GlitchTip (это ещё один PostgreSQL) лучше 
 | `daily_activity`, `user_top_snapshots`, `listening_reports`, прочее | ~2 тыс. дней × 40 B + 15 снапшотов × ~10 KB + отчёты | ≈ 0,3 GB |
 | **Итого данные** | | **≈ 11–12 GB** |
 | WAL, временные файлы, запас под VACUUM и миграции | ×1,3 | **≈ 15 GB на 1 000 пользователей** |
+
+Плюс **фиксированный** объём схемы `mb` (копия core-данных MusicBrainz, §6.1): от числа пользователей не зависит; замерить при первом импорте (**не проверено**). Полное зеркало без поиска — 100 ГБ ([musicbrainz-docker](https://github.com/metabrainz/musicbrainz-docker)), выборка нужных таблиц должна быть заметно меньше.
 
 **Прирост:** 30 прослушиваний/день × 1 000 активных = 30 тыс. строк/день ≈ 6 MB/день по `listens` ≈ **2 GB/год**, с rollup'ами — **≈ 3 GB/год** на 1 000 активных пользователей.
 
@@ -1216,6 +1212,8 @@ Prometheus, Grafana и GlitchTip (это ещё один PostgreSQL) лучше 
 | | Возраст самой старой задачи `incremental` / `ingest_batch` | > 15 мин |
 | | Бэклог `backfill` | > 24 ч до завершения |
 | | Записи в dead-letter (§11.6) | > 0 за час → алерт |
+| | Нет живого воркера (heartbeat) | > 2 мин — периодические задачи не ставятся (§6.3) |
+| | Доля времени БД на запросы очереди procrastinate (`pg_stat_statements`) | > 10% устойчиво — вынести очередь в отдельную базу (§6.3, §7.5) |
 | PostgreSQL (postgres_exporter, pg_stat_statements) | CPU хоста | > 70% |
 | | iowait | > 10–20% |
 | | IOPS/пропускная способность | > 80% лимита тарифа |
@@ -1225,7 +1223,6 @@ Prometheus, Grafana и GlitchTip (это ещё один PostgreSQL) лучше 
 | | Горячие секции `listens` + индексы | > 50% RAM |
 | | Автовакуум | `n_dead_tup / n_live_tup` > 20%, `last_autovacuum` > 1 сут на горячих таблицах, возраст XID > 500 млн |
 | Valkey (redis_exporter, поддерживает Valkey) | `used_memory / maxmemory` | > 75% |
-| | `evicted_keys` в экземпляре очереди | > 0 — **критично** |
 | | Латентность команд | p99 > 10 мс |
 | API (метрики приложения/Caddy) | p95 латентности чтения | > 300 мс |
 | | Доля 5xx | > 1% |
@@ -1243,7 +1240,7 @@ Prometheus, Grafana и GlitchTip (это ещё один PostgreSQL) лучше 
 2. **PostgreSQL — на отдельный сервер или managed PostgreSQL в РФ** (Yandex Cloud, Selectel, VK Cloud). Меняется `DATABASE_URL`, перенос — `pg_dump/restore` в окно обслуживания или логическая репликация почти без простоя.
 3. **Воркеры — на отдельные VM.** Те же образы, `ROLE=worker`, `WORKER_QUEUES=backfill,enrich` на одной машине и `incremental,aggregate` на другой. Глобальный token bucket в Valkey гарантирует, что больше воркеров ≠ больше запросов к Last.fm (ToS п. 4.4).
 4. **Read replica для статистики.** `DATABASE_READ_URL`: профили, топы, отчёты и лидерборды читаются с реплики (лаг в секунды для статистики приемлем), запись и чтение «сразу после записи» (настройки) — с primary.
-5. **Valkey — отдельно** (своя VM или managed), очередь и кэш физически разделены (`VALKEY_QUEUE_URL`, `VALKEY_CACHE_URL`). Либо очередь переезжает в PostgreSQL (procrastinate, §6.3).
+5. **Valkey — отдельно** (своя VM или managed, `VALKEY_URL`). **Очередь** — в отдельную базу PostgreSQL (`JOBS_DATABASE_URL`), если её нагрузка заметна на основной (§7.4); тогда задачи ставятся уже не в транзакции приложения. Воркеры подключаются к базе очереди напрямую или через PgBouncer в session-режиме: LISTEN/NOTIFY в transaction-режиме не работает.
 6. **Несколько экземпляров api и web** за Caddy (`reverse_proxy` с несколькими upstream + health checks). **Ingest-эндпоинты** (`/apis/listenbrainz/*`, `/2.0/`) удобно вынести в отдельный пул `api` (тот же образ, отдельный upstream по пути), чтобы всплеск приёма не тормозил страницы. Позже — отдельный балансировщик провайдера.
 
 Дальше, если понадобится: архив старых секций `listens` на дешёвый диск, TimescaleDB-компрессия (§6.1), шардирование по `user_id`. На горизонте этапа 1 это не нужно.
@@ -1262,9 +1259,8 @@ flowchart LR
   A1 -- "чтение статистики" --> REP[("Read replica")]
   PRI -- "репликация" --> REP
   A1 --> RC[("Valkey: кэш, ZSET")]
-  SCH["scheduler ×1 (лидер-лок)"] --> RQ[("Valkey: очередь<br/>или procrastinate в PG")]
-  RQ --> WK1["worker VM 1: incremental, aggregate"]
-  RQ --> WK2["worker VM 2: backfill, enrich, reports"]
+  PRI -- "очередь procrastinate<br/>(или отдельная база)" --> WK1["worker VM 1: incremental, aggregate"]
+  PRI -- "очередь procrastinate" --> WK2["worker VM 2: backfill, enrich, reports"]
   WK1 --> PGB
   WK2 --> PGB
   WK1 --> RC
@@ -1277,10 +1273,10 @@ flowchart LR
 ### 7.6 Почему переезд — это смена конфигурации, а не переписывание
 
 - **Stateless-процессы.** api, web и worker не хранят состояние локально: сессии лежат в БД или Valkey, файлы — в S3, задачи — в очереди. Любой процесс можно запустить в N экземплярах на любой машине.
-- **Один образ, роль задаётся переменной окружения:** `ROLE=api|worker|scheduler|bot`.
-- **Вся топология — в переменных окружения:** `DATABASE_URL`, `DATABASE_READ_URL` (по умолчанию = `DATABASE_URL`), `VALKEY_QUEUE_URL`, `VALKEY_CACHE_URL`, `JOBS_BACKEND=arq|dramatiq|saq|procrastinate`, `WORKER_QUEUES`, `WORKER_CONCURRENCY`, `INGEST_RATE_LIMITS`, `INGEST_DEDUP_WINDOW_S`, `LASTFM_ENABLED`, `LASTFM_RATE_LIMIT_RPS`, `LASTFM_EGRESS_PROXY`, `S3_ENDPOINT`, `S3_BUCKET`, `EMAIL_BACKEND=smtp|api|catcher|memory`, `EMAIL_TX_FROM`, `EMAIL_NEWS_FROM`, `EMAIL_WEBHOOK_SECRET`, `EMAIL_HASH_KEY`, `AUTH_EMAIL_PASSWORD`, `AUTH_EMAIL_SIGNUP`.
+- **Один образ, роль задаётся переменной окружения:** `ROLE=api|worker|bot|migrate`.
+- **Вся топология — в переменных окружения:** `DATABASE_URL`, `DATABASE_READ_URL` (по умолчанию = `DATABASE_URL`), `JOBS_DATABASE_URL` (по умолчанию = `DATABASE_URL`), `VALKEY_URL`, `JOBS_BACKEND=procrastinate` (другие — через адаптер, §6.3), `MB_DUMP_URL`, `WORKER_QUEUES`, `WORKER_CONCURRENCY`, `INGEST_RATE_LIMITS`, `INGEST_DEDUP_WINDOW_S`, `LASTFM_ENABLED`, `LASTFM_RATE_LIMIT_RPS`, `LASTFM_EGRESS_PROXY`, `S3_ENDPOINT`, `S3_BUCKET`, `EMAIL_BACKEND=smtp|api|catcher|memory`, `EMAIL_TX_FROM`, `EMAIL_NEWS_FROM`, `EMAIL_WEBHOOK_SECRET`, `EMAIL_HASH_KEY`, `AUTH_EMAIL_PASSWORD`, `AUTH_EMAIL_SIGNUP`.
 - **Очередь — за тонким интерфейсом `jobs`** (§6.3): смена брокера = новый адаптер + `JOBS_BACKEND`.
-- **Единственный синглтон — scheduler.** Защищён лидер-локом (`pg_try_advisory_lock` или Valkey-лок с TTL), поэтому случайный второй экземпляр безопасен.
+- **Синглтонов нет.** Периодические задачи ставят воркеры, а procrastinate гарантирует одну постановку за период при любом числе воркеров (§6.3).
 - **Миграции** выполняются отдельным шагом деплоя, а не при старте каждого экземпляра.
 
 ---
@@ -1902,14 +1898,14 @@ API: `GET /api/v1/me/recommendations?type=all|artists|albums|tracks&cursor=`, `P
 **Вход:** `sync_state.next_run_at`, `last_success_at`, активность пользователя; конфиг `LASTFM_RATE_LIMIT_RPS`.
 
 **Шаги:**
-1. **Планировщик** (раз в минуту, под лидер-локом, §7.6): `SELECT account_id FROM sync_state WHERE next_run_at <= now() AND (phase = 'backfill' OR (phase = 'incremental' AND sync_enabled)) ORDER BY next_run_at LIMIT 500` → `enqueue("sync", unique_key=f"sync:{id}", queue=…)`. Очереди с приоритетами: `incremental` > `backfill` > `enrich`.
+1. **Планировщик** — периодическая задача procrastinate (раз в минуту; одна постановка за период при любом числе воркеров, §6.3): `SELECT account_id FROM sync_state WHERE next_run_at <= now() AND (phase = 'backfill' OR (phase = 'incremental' AND sync_enabled)) ORDER BY next_run_at LIMIT 500` → `enqueue("sync", unique_key=f"sync:{id}", queue=…)`. Очереди с приоритетами: `incremental` > `backfill` > `enrich`.
 2. **Адаптивный интервал** после успешного incremental (только `sync_enabled`; у остальных после импорта задач по расписанию нет):
    - now playing или скробблы за последний час → 3–5 мин;
    - скробблы за последние 30 дней → 30–60 мин;
    - иначе → 24 ч;
    - плюс jitter ±10%;
    - «Обновить сейчас» — не чаще раза в 5 минут.
-3. **Rate limit — token bucket в Valkey**, атомарный Lua-скрипт: ключ `rl:lastfm:{egress_ip}`, ёмкость = 2 × RPS, пополнение RPS токенов в секунду. Если токена нет, скрипт возвращает время ожидания и воркер ждёт (`asyncio.sleep`), не занимая слот впустую. Bucket общий для всех воркеров и машин. Отдельный bucket `rl:musicbrainz` — 1 req/s.
+3. **Rate limit — token bucket в Valkey**, атомарный Lua-скрипт: ключ `rl:lastfm:{egress_ip}`, ёмкость = 2 × RPS, пополнение RPS токенов в секунду. Если токена нет, скрипт возвращает время ожидания и воркер ждёт (`asyncio.sleep`), не занимая слот впустую. Bucket общий для всех воркеров и машин. Отдельный bucket `rl:musicbrainz` — 1 req/s, только для запросов к API MusicBrainz за тем, чего ещё нет в локальной копии (§6.1).
 4. **Ошибки** (коды — [errorcodes](https://www.last.fm/api/errorcodes)):
 
    | Код / ситуация | Действие |
@@ -2317,7 +2313,7 @@ CREATE TABLE notification_deliveries (
 4. История прослушиваний; топ артистов, альбомов и треков за периоды `7d…all` (§9.1); график по дням.
 5. Стрики (порог N = 1), 10–15 базовых достижений с ретроактивной выдачей.
 6. Подписки, приватность профиля и разделов, лидерборды среди друзей за неделю, месяц и всё время (§8.3, §11.7), совместимость вкусов.
-7. Обогащение: MBID, длительность и обложки через MusicBrainz и Cover Art Archive (фоном, ≤1 req/s); теги — из MusicBrainz, `track.getInfo` Last.fm — запасной вариант (§12.5).
+7. Обогащение: MBID, длительность и альбом — по локальной копии core-данных MusicBrainz (§6.1), API MusicBrainz (≤1 req/s) — только для того, что новее дампа; обложки — Cover Art Archive; длительность — также от своих клиентов. Теги — из MusicBrainz (это supplementary data под CC BY-NC-SA, при Pro — после ответа MetaBrainz, §16, п. 46), `track.getInfo` Last.fm — запасной вариант (§12.5).
 8. Атрибуция Last.fm на страницах с импортированными данными; страница «удалить аккаунт и данные» (и отдельно — «удалить импорт Last.fm»).
 9. Экраны профиля, меню аккаунта, in-app уведомления и настройки — по таблице приоритетов §9.12.
 10. Telegram-бот: привязка, `/now`, `/stats`, `/top`, `/streak` и уведомления (§13.9).
@@ -2370,7 +2366,7 @@ CREATE TABLE notification_deliveries (
 
 **Инфраструктура**
 19. Нужен ли сразу TimescaleDB, или хватит секционирования + rollup'ов (пересмотреть примерно на 100 млн строк).
-20. Выбор хостинга и тарифа в РФ (VPS или сразу managed PostgreSQL); после первых ~100 пользователей проверить оценки §7.3 через `pg_total_relation_size` и пороги §7.4.
+20. Выбор хостинга и тарифа в РФ (VPS или сразу managed PostgreSQL 18 — у кого он есть, §6.1); после первых ~100 пользователей проверить оценки §7.3 через `pg_total_relation_size` и пороги §7.4.
 
 **Монетизация**
 21. **Цена Pro** утверждена — 99 ₽ за 30 дней разовым платежом, без автопродления и без годового тарифа (§12.2). Открыто: после запуска оценить конверсию; нужны ли позже годовой тариф или автопродление (Later, §12.4).
@@ -2405,6 +2401,11 @@ CREATE TABLE notification_deliveries (
 42. **Tauri или Electron** для десктопа; надёжно ли работает JS-ядро в скрытом окне Tauri — проверить прототипом (§18.12).
 43. **macOS:** поддерживать ли через mediaremote-adapter (обход ограничения macOS 15.4+, Apple может закрыть) и когда (§18.6).
 44. Набор коннекторов MVP и порядок; скробблить ли видео-сайты; названия клиентов в магазинах (§18.5, §18.14).
+
+**Стек (по [ревью](review.md), §2)**
+45. **Копия MusicBrainz (§6.1):** размер выборки core-таблиц и где её держать (схема `mb` на основном сервере или отдельная база); как часто обновлять из дампа.
+46. **MetaBrainz и коммерческое использование:** при Pro нужны ли поддержка MetaBrainz или договор — для Live Data Feed и для тегов (supplementary data, CC BY-NC-SA 3.0); пока ответа нет, Pro-функции не строим на тегах MusicBrainz.
+47. **Спайк очереди (§6.3):** procrastinate на связке SQLAlchemy async + psycopg 3 с постановкой задачи в транзакции приложения (`connection=…`); нагрузка очереди на основную БД при импорте.
 
 ---
 
