@@ -21,17 +21,20 @@ use player_engine::{Engine, EngineConfig, EngineEvent, EngineMessage, EngineTrac
 use player_history::{HistoryStore, Outcome, PlayRecord};
 use player_library::TrackStore;
 use player_playback::Queue;
+use player_playlists::PlaylistStore;
 use player_ports::{AudioOutput, Clock, FileAccess, HttpTransport, MediaSession, SecureStore};
 use scrobb_api::{ClientKind, Thresholds};
 use scrobb_client::{ClientInfo, ScrobbClient};
 use serde::{Deserialize, Serialize};
 
 mod history;
+mod playlists;
 mod scrobb;
 
 use history::{HistoryService, Message, Stamp};
 use scrobb::{Remote, ScrobbPorts};
 
+pub use playlists::{ImportReport, PlaylistCard, PlaylistView, ResolvedItem};
 pub use scrobb::SCROBB_TOKEN_KEY;
 
 /// «Назад» в первые 3 секунды трека — предыдущий трек, позже — начало текущего.
@@ -64,6 +67,9 @@ pub struct Stores {
     /// История прослушиваний (`player-store-sqlite`); без неё ничего не запоминается
     /// и не скробблится.
     pub history: Option<Arc<dyn HistoryStore>>,
+    /// Плейлисты (`user.db`, `player-store-sqlite`); без них методы плейлистов —
+    /// ошибка `missing_port`.
+    pub playlists: Option<Arc<dyn PlaylistStore>>,
 }
 
 /// Настройки ядра.
@@ -211,6 +217,8 @@ pub enum CoreError {
     InvalidQueue,
     /// Ошибка хранилища истории.
     History(String),
+    /// Ошибка плейлиста: нет такого, пустое название, файл не разобрался.
+    Playlist(String),
 }
 
 /// Ядро плеера.
@@ -278,6 +286,8 @@ impl Core {
             engine,
             library: stores.library,
             history: stores.history,
+            playlists: stores.playlists,
+            playlist_ids: Mutex::new(uuid::ContextV7::new()),
             messages,
             clock: ports.clock,
             observer,
@@ -514,6 +524,9 @@ struct Inner {
     engine: Engine,
     library: Arc<dyn TrackStore>,
     history: Option<Arc<dyn HistoryStore>>,
+    playlists: Option<Arc<dyn PlaylistStore>>,
+    /// UUIDv7 плейлистов и их элементов: монотонные в пределах миллисекунды.
+    playlist_ids: Mutex<uuid::ContextV7>,
     /// Сообщения потоку истории; `None` — история не ведётся.
     messages: Option<mpsc::Sender<Message>>,
     clock: Arc<dyn Clock>,

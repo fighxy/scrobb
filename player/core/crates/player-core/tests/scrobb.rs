@@ -275,6 +275,7 @@ impl Harness {
         let stores = Stores {
             library: Arc::new(library),
             history: Some(store.clone()),
+            playlists: None,
         };
         let core = Core::new(ports, stores, config, recorder.clone());
         Self {

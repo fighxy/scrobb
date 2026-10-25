@@ -1,0 +1,19 @@
+[package]
+name = "player-playlists"
+description = "Плейлисты: модель, порядок, хранилище и форматы файлов (M3U, PLS, XSPF, JSPF, CSV, TXT)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+player-domain.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+quick-xml.workspace = true
+
+[dev-dependencies]
+player-testkit.workspace = true
+
+[lints]
+workspace = true

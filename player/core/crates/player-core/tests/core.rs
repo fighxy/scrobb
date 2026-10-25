@@ -30,6 +30,7 @@ fn stores(library: MemoryLibrary) -> Stores {
     Stores {
         library: Arc::new(library),
         history: None,
+        playlists: None,
     }
 }
 

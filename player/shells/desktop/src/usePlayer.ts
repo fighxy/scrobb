@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { toast as notify } from "sonner";
-import type { Backend, Command, PlayerState, PlayRecord, Scanning, ScrobbleStatus, Track, TrackId } from "./core";
+import type { Backend, Command, PlayerState, PlaylistId, PlayRecord, Scanning, ScrobbleStatus, Track, TrackId } from "./core";
 import { describeError } from "./core";
 import { livePosition } from "./format";
 
@@ -28,6 +28,7 @@ export function usePlayer(backend: Backend) {
   const [scanning, setScanning] = useState<Scanning | null>(null);
   const [scrobbling, setScrobbling] = useState<ScrobbleStatus | null>(null);
   const [scrobblingAvailable, setScrobblingAvailable] = useState(false);
+  const [openedPlaylist, setOpenedPlaylist] = useState<PlaylistId | null>(null);
   const [linkCode, setLinkCode] = useState<LinkCode | null>(null);
   const [history, setHistory] = useState<PlayRecord[]>([]);
   const [queue, setQueue] = useState<TrackId[]>([]);
@@ -95,6 +96,7 @@ export function usePlayer(backend: Backend) {
       setScanning(snap.scanning);
       setScrobbling((current) => current ?? snap.scrobbling);
       setScrobblingAvailable(snap.scrobbling_available);
+      setOpenedPlaylist(snap.opened_playlist);
     }, (e) => toast(describeError(e)));
     refreshHistory();
     return () => {
@@ -166,6 +168,7 @@ export function usePlayer(backend: Backend) {
     scanning,
     scrobbling,
     scrobblingAvailable,
+    openedPlaylist,
     linkCode,
     history,
     queue,

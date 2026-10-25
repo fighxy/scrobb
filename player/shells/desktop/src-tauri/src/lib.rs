@@ -50,6 +50,16 @@ pub fn run() {
             bridge::recent_plays,
             bridge::queue,
             bridge::cover_color,
+            bridge::playlists,
+            bridge::playlist,
+            bridge::create_playlist,
+            bridge::update_playlist,
+            bridge::delete_playlist,
+            bridge::add_to_playlist,
+            bridge::remove_from_playlist,
+            bridge::move_in_playlist,
+            bridge::import_playlist,
+            bridge::export_playlist,
         ])
         .build(tauri::generate_context!())
         .expect("приложение собирается");

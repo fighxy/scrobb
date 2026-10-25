@@ -1,8 +1,12 @@
 import { useApp } from "@/app-context";
+import { MoreHorizontal } from "lucide-react";
 import { AlbumCard, ArtistCard, CardGrid } from "@/components/Cards";
-import { Cover, InlineLink, PlayButton } from "@/components/common";
+import { Cover, IconButton, InlineLink, PlayButton } from "@/components/common";
 import { Eyebrow, Page, PageTitle } from "@/components/Page";
+import { AddToPlaylist } from "@/components/playlist-ui";
 import { TrackTable } from "@/components/TrackTable";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
+import type { Track } from "@/core";
 import { ALBUMS, count, longDuration, TRACKS } from "@/format";
 import { artistKey } from "@/lib/library";
 import { useCoverColor } from "@/usePlayer";
@@ -66,11 +70,12 @@ export function AlbumView({ albumKey }: { albumKey: string }) {
         </div>
       }
     >
-      <div className="px-6 py-5">
+      <div className="flex items-center gap-3 px-6 py-5">
         <PlayButton
           playing={active && app.state.status === "playing"}
           onClick={() => (active ? app.toggle() : app.play(album.tracks, 0))}
         />
+        <MoreMenu tracks={album.tracks} />
       </div>
       <TrackTable tracks={album.tracks} albumMode />
     </Page>
@@ -124,11 +129,12 @@ export function ArtistView({ artistKey: key }: { artistKey: string }) {
         </div>
       }
     >
-      <div className="px-6 py-5">
+      <div className="flex items-center gap-3 px-6 py-5">
         <PlayButton
           playing={active && app.state.status === "playing"}
           onClick={() => (active ? app.toggle() : app.play(artist.tracks, 0))}
         />
+        <MoreMenu tracks={artist.tracks} />
       </div>
       {artist.albums.length > 0 && (
         <section aria-label="Альбомы" className="mb-6">
@@ -141,5 +147,21 @@ export function ArtistView({ artistKey: key }: { artistKey: string }) {
         <TrackTable tracks={artist.tracks} />
       </section>
     </Page>
+  );
+}
+
+/** «⋯» в шапке альбома и артиста: все треки — в плейлист. */
+function MoreMenu({ tracks }: { tracks: Track[] }) {
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <IconButton label="Ещё" className="ml-2 size-10 [&_svg]:size-6">
+          <MoreHorizontal />
+        </IconButton>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="start" className="w-60">
+        <AddToPlaylist kind="dropdown" tracks={tracks.map((t) => t.id)} />
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }

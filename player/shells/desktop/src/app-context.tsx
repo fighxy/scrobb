@@ -5,6 +5,7 @@ import { createContext, useContext } from "react";
 import type { Backend, CoverSize, PlayerState, Track, TrackId } from "./core";
 import type { Library } from "./lib/library";
 import type { View } from "./lib/nav";
+import type { Playlists } from "./usePlaylists";
 
 export interface AppApi {
   backend: Backend;
@@ -22,6 +23,8 @@ export interface AppApi {
   /** Обложка трека (общая для альбома). */
   cover(t: Track, size?: CoverSize): string;
   reveal(path: string): void;
+  /** Плейлисты и действия с ними. */
+  playlists: Playlists;
 }
 
 export const AppContext = createContext<AppApi | null>(null);

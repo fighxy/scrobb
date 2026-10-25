@@ -11,9 +11,8 @@
 //! Крейт без I/O и собирается под wasm: хранилище — за трейтом [`HistoryStore`]
 //! (SQLite — `player-store-sqlite`, в памяти — [`MemoryHistory`]).
 
-use std::collections::BTreeMap;
-
-use player_domain::{Track, TrackId};
+use player_domain::TrackId;
+pub use player_domain::TrackSnapshot;
 use scrobb_api::{ClientKind, ListenSubmission, Mbids, NowPlaying, Source};
 use serde::{Deserialize, Serialize};
 
@@ -81,40 +80,6 @@ impl Outcome {
         ]
         .into_iter()
         .find(|o| o.as_str() == s)
-    }
-}
-
-/// Метаданные трека на момент прослушивания.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TrackSnapshot {
-    /// Название.
-    pub title: String,
-    /// Артисты.
-    pub artists: Vec<String>,
-    /// Альбом.
-    pub album: Option<String>,
-    /// Артист альбома.
-    pub album_artist: Option<String>,
-    /// Длительность.
-    pub duration_ms: Option<u64>,
-    /// MusicBrainz recording ID.
-    pub recording_mbid: Option<String>,
-    /// Внешние идентификаторы (`isrc`, `yandex`…) — с теми же ключами,
-    /// что `ext_ids` на сервере (`docs/architecture.md` §5.1).
-    pub ext_ids: BTreeMap<String, String>,
-}
-
-impl From<&Track> for TrackSnapshot {
-    fn from(track: &Track) -> Self {
-        Self {
-            title: track.title.clone(),
-            artists: track.artists.clone(),
-            album: track.album.clone(),
-            album_artist: track.album_artist.clone(),
-            duration_ms: track.duration_ms,
-            recording_mbid: track.recording_mbid.clone(),
-            ext_ids: BTreeMap::new(),
-        }
     }
 }
 

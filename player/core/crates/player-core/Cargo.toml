@@ -13,6 +13,7 @@ player-playback.workspace = true
 player-engine.workspace = true
 player-library.workspace = true
 player-history.workspace = true
+player-playlists.workspace = true
 player-metadata.workspace = true
 player-plugins.workspace = true
 scrobb-api.workspace = true

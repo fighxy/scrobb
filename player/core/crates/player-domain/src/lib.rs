@@ -4,6 +4,8 @@
 //! (`serde`): так их получают оболочки, которым ядро отдаёт JSON, — окно Tauri
 //! и веб. Формат закреплён тестом `player-core/tests/json.rs`.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 /// Локальный идентификатор трека в базе этого устройства.
@@ -54,8 +56,60 @@ pub struct Track {
     pub disc_no: Option<u32>,
     /// MusicBrainz recording ID.
     pub recording_mbid: Option<String>,
+    /// ISRC — код записи, по которому трек узнают стриминги.
+    #[serde(default)]
+    pub isrc: Option<String>,
     /// ReplayGain.
     pub replay_gain: ReplayGain,
+}
+
+/// Метаданные трека, не привязанные к файлу: снимок в истории прослушиваний
+/// и в плейлисте. По ним трек узнаётся на другом устройстве и в другом сервисе.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrackSnapshot {
+    /// Название.
+    pub title: String,
+    /// Артисты.
+    pub artists: Vec<String>,
+    /// Альбом.
+    pub album: Option<String>,
+    /// Артист альбома.
+    pub album_artist: Option<String>,
+    /// Длительность.
+    pub duration_ms: Option<u64>,
+    /// MusicBrainz recording ID.
+    pub recording_mbid: Option<String>,
+    /// Внешние идентификаторы (`isrc`, `yandex`…) — с теми же ключами,
+    /// что `ext_ids` на сервере (`docs/architecture.md` §5.1).
+    pub ext_ids: BTreeMap<String, String>,
+}
+
+impl TrackSnapshot {
+    /// ISRC из `ext_ids`.
+    pub fn isrc(&self) -> Option<&str> {
+        self.ext_ids.get(EXT_ISRC).map(String::as_str)
+    }
+}
+
+/// Ключ ISRC в `ext_ids`.
+pub const EXT_ISRC: &str = "isrc";
+
+impl From<&Track> for TrackSnapshot {
+    fn from(track: &Track) -> Self {
+        let mut ext_ids = BTreeMap::new();
+        if let Some(isrc) = &track.isrc {
+            ext_ids.insert(EXT_ISRC.to_owned(), isrc.clone());
+        }
+        Self {
+            title: track.title.clone(),
+            artists: track.artists.clone(),
+            album: track.album.clone(),
+            album_artist: track.album_artist.clone(),
+            duration_ms: track.duration_ms,
+            recording_mbid: track.recording_mbid.clone(),
+            ext_ids,
+        }
+    }
 }
 
 /// Состояние воспроизведения.

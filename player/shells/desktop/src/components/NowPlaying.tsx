@@ -1,9 +1,11 @@
-import { ChevronDown, X } from "lucide-react";
+import { ChevronDown, MoreHorizontal, X } from "lucide-react";
 import { AnimatePresence, m } from "motion/react";
 import type { CSSProperties } from "react";
 import { useApp } from "@/app-context";
 import { Cover, Equalizer, IconButton, InlineLink } from "@/components/common";
 import { Controls, Progress } from "@/components/PlayerBar";
+import { AddToPlaylist } from "@/components/playlist-ui";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import type { Command, Track } from "@/core";
 import { artists } from "@/format";
 import { albumKey, artistKey, coverOf, primaryArtist } from "@/lib/library";
@@ -39,13 +41,25 @@ function TrackTitle({ track, large }: { track: Track; large?: boolean }) {
   const album = albumKey(track);
   const artist = primaryArtist(track);
   return (
-    <div className="min-w-0">
-      <div className={large ? "truncate text-2xl font-bold" : "truncate text-xl font-bold"}>
-        <InlineLink onClick={album ? () => app.go({ kind: "album", key: album }) : undefined}>{track.title}</InlineLink>
+    <div className="flex items-start gap-2">
+      <div className="min-w-0 flex-1">
+        <div className={large ? "truncate text-2xl font-bold" : "truncate text-xl font-bold"}>
+          <InlineLink onClick={album ? () => app.go({ kind: "album", key: album }) : undefined}>{track.title}</InlineLink>
+        </div>
+        <div className="truncate text-muted-foreground">
+          <InlineLink onClick={artist ? () => app.go({ kind: "artist", key: artistKey(artist) }) : undefined}>{artists(track.artists)}</InlineLink>
+        </div>
       </div>
-      <div className="truncate text-muted-foreground">
-        <InlineLink onClick={artist ? () => app.go({ kind: "artist", key: artistKey(artist) }) : undefined}>{artists(track.artists)}</InlineLink>
-      </div>
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <IconButton label="Ещё о треке" className="mt-0.5 shrink-0">
+            <MoreHorizontal />
+          </IconButton>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end" className="w-60">
+          <AddToPlaylist kind="dropdown" tracks={[track.id]} />
+        </DropdownMenuContent>
+      </DropdownMenu>
     </div>
   );
 }

@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "description": "Нормализация ключа трека «артист + название» (docs/architecture.md §5.3). По ключу плеер и сервер узнают один трек на разных устройствах и в разных источниках: синхронизация рейтингов и плейлистов, импорт плейлистов, сопоставление скробблов. key.artist — главный артист (до feat./ft./featuring/при участии), key.title — название без вставки «feat. …»; оба после NFKC, «ё» → «е», схлопывания пробелов и casefold. Сервер хранит sha256(key.artist + U+001F + key.title).",
+  "cases": [
+    { "name": "регистр и пробелы", "artist": "  КИНО ", "title": "Группа   Крови", "key": { "artist": "кино", "title": "группа крови" } },
+    { "name": "ё = е", "artist": "Ёлка", "title": "Прованс (Ёлки-палки)", "key": { "artist": "елка", "title": "прованс (елки-палки)" } },
+    { "name": "NFKC: полноширинные буквы и лигатуры", "artist": "ＡＢＢＡ", "title": "ﬁnal Countdown", "key": { "artist": "abba", "title": "final countdown" } },
+    { "name": "casefold: ß", "artist": "Die Ärzte", "title": "Straße", "key": { "artist": "die ärzte", "title": "strasse" } },
+    { "name": "feat. в скобках", "artist": "Luis Fonsi", "title": "Despacito (feat. Justin Bieber)", "key": { "artist": "luis fonsi", "title": "despacito" } },
+    { "name": "ft. в квадратных скобках", "artist": "Баста", "title": "Сансара [ft. Скриптонит]", "key": { "artist": "баста", "title": "сансара" } },
+    { "name": "feat без скобок — до конца строки", "artist": "Drake", "title": "Song Feat. Rihanna", "key": { "artist": "drake", "title": "song" } },
+    { "name": "featuring, остальные скобки остаются", "artist": "Artist", "title": "Song (featuring Guest) (Remix)", "key": { "artist": "artist", "title": "song (remix)" } },
+    { "name": "при участии", "artist": "Земфира", "title": "Песня (при участии Гостя)", "key": { "artist": "земфира", "title": "песня" } },
+    { "name": "при уч.", "artist": "Сплин", "title": "Романс при уч. Би-2", "key": { "artist": "сплин", "title": "романс" } },
+    { "name": "граница слова: ft внутри слова — не вставка", "artist": "Linkin Park", "title": "Left Behind", "key": { "artist": "linkin park", "title": "left behind" } },
+    { "name": "граница слова: Lift Off", "artist": "Jay-Z", "title": "Lift Off", "key": { "artist": "jay-z", "title": "lift off" } },
+    { "name": "главный артист до feat.", "artist": "Kanye West feat. Rihanna", "title": "All of the Lights", "key": { "artist": "kanye west", "title": "all of the lights" } },
+    { "name": "главный артист до ft.", "artist": "Баста ft. Гуф", "title": "Самба белого мотылька", "key": { "artist": "баста", "title": "самба белого мотылька" } },
+    { "name": "главный артист до при участии", "artist": "Сплин при участии Би-2", "title": "Феллини", "key": { "artist": "сплин", "title": "феллини" } },
+    { "name": "& и запятая артиста не делят (MVP)", "artist": "Simon & Garfunkel", "title": "The Boxer", "key": { "artist": "simon & garfunkel", "title": "the boxer" } },
+    { "name": "Daft Punk: ft внутри имени не делит", "artist": "Daft Punk", "title": "One More Time", "key": { "artist": "daft punk", "title": "one more time" } },
+    { "name": "пустое название остаётся пустым", "artist": "Кино", "title": "", "key": { "artist": "кино", "title": "" } }
+  ]
+}

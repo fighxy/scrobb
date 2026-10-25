@@ -70,6 +70,7 @@ fn events_and_state_keep_their_shape() {
         track_no: Some(4),
         disc_no: None,
         recording_mbid: None,
+        isrc: None,
         replay_gain: ReplayGain::default(),
     };
     let state = PlayerState {
@@ -88,7 +89,7 @@ fn events_and_state_keep_their_shape() {
             "current": {
                 "id": 7, "uri": "/music/a.flac", "title": "Кукушка", "artists": ["Кино"],
                 "album": null, "album_artist": null, "duration_ms": 400000,
-                "track_no": 4, "disc_no": null, "recording_mbid": null,
+                "track_no": 4, "disc_no": null, "recording_mbid": null, "isrc": null,
                 "replay_gain": {"track_gain_db": null, "track_peak": null,
                                 "album_gain_db": null, "album_peak": null}
             },
@@ -147,4 +148,70 @@ fn history_records_serialize_flat() {
     assert_eq!(value["track"]["artists"], json!(["Кино"]));
     assert_eq!(value["track"]["ext_ids"], json!({}));
     assert_eq!(value["track_id"], 7);
+}
+
+#[test]
+fn playlists_serialize_for_the_window() {
+    use player_core::{ImportReport, PlaylistView, ResolvedItem};
+    use player_playlists::formats::Format;
+    use player_playlists::{ItemId, Playlist, PlaylistId, PlaylistItem};
+
+    let playlist = Playlist {
+        id: PlaylistId("019a1b2c-0000-7000-8000-000000000001".into()),
+        title: "Вечер".into(),
+        description: None,
+        origin: Some("import:m3u".into()),
+        created_at_ms: 1,
+        updated_at_ms: 2,
+    };
+    let view = PlaylistView {
+        playlist: playlist.clone(),
+        items: vec![ResolvedItem {
+            item: PlaylistItem {
+                id: ItemId("i1".into()),
+                position: "V".into(),
+                added_at_ms: 3,
+                location: None,
+                track: TrackSnapshot {
+                    title: "Кукушка".into(),
+                    artists: vec!["Кино".into()],
+                    ..TrackSnapshot::default()
+                },
+            },
+            track_id: None,
+        }],
+    };
+    let playlist_json = json!({
+        "id": "019a1b2c-0000-7000-8000-000000000001", "title": "Вечер", "description": null,
+        "origin": "import:m3u", "created_at_ms": 1, "updated_at_ms": 2
+    });
+    assert_eq!(
+        to_json(&view),
+        json!({
+            "playlist": playlist_json,
+            "items": [{
+                "id": "i1", "position": "V", "added_at_ms": 3, "location": null,
+                "track": {"title": "Кукушка", "artists": ["Кино"], "album": null, "album_artist": null,
+                          "duration_ms": null, "recording_mbid": null, "ext_ids": {}},
+                "track_id": null
+            }]
+        })
+    );
+    assert_eq!(
+        to_json(&ImportReport {
+            playlist,
+            total: 3,
+            matched: 2
+        }),
+        json!({"playlist": playlist_json, "total": 3, "matched": 2})
+    );
+    assert_eq!(to_json(&Format::M3u), json!("m3u"));
+    assert_eq!(
+        serde_json::from_value::<Format>(json!("jspf")).unwrap(),
+        Format::Jspf
+    );
+    assert_eq!(
+        to_json(&CoreError::Playlist("нет плейлиста".into())),
+        json!({"type": "playlist", "data": "нет плейлиста"})
+    );
 }

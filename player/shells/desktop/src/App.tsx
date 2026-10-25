@@ -20,6 +20,8 @@ import { useTheme } from "./lib/theme";
 import { useMediaQuery, usePlayer } from "./usePlayer";
 import { AlbumsView, AlbumView, ArtistsView, ArtistView } from "./views/Albums";
 import { HistoryView } from "./views/History";
+import { PlaylistView } from "./views/Playlist";
+import { usePlaylists } from "./usePlaylists";
 import { TracksView } from "./views/Tracks";
 
 const IS_MAC = /Mac OS/.test(navigator.userAgent);
@@ -48,6 +50,7 @@ function viewKey(view: View): string {
 
 export function App({ backend }: { backend: Backend }) {
   const p = usePlayer(backend);
+  const playlists = usePlaylists(backend, p.toast, p.tracks);
   const { theme, resolved, setTheme } = useTheme();
   const nav = useNav();
   // ≥ 1100 px — три колонки; 760–1100 — «Сейчас играет» по кнопке; уже — полоса значков.
@@ -62,6 +65,11 @@ export function App({ backend }: { backend: Backend }) {
   const layout = useDefaultLayout({ id: "scrobb-layout", panelIds: panels, storage: layoutStorage });
 
   useEffect(() => setNowPlaying(wide), [wide]);
+  // Запустили с файлом плейлиста — сразу показать его.
+  const { go } = nav;
+  useEffect(() => {
+    if (p.openedPlaylist) go({ kind: "playlist", key: p.openedPlaylist });
+  }, [p.openedPlaylist, go]);
   useEffect(() => {
     if (medium) setFullscreen(false);
   }, [medium]);
@@ -92,8 +100,9 @@ export function App({ backend }: { backend: Backend }) {
       reveal: (path) => {
         backend.revealInFolder(path).catch((e) => p.toast(describeError(e)));
       },
+      playlists,
     }),
-    [backend, lib, tracks, state, queue, nav.go, run, p.toast],
+    [backend, lib, tracks, state, queue, nav.go, run, p.toast, playlists],
   );
 
   const topBar = (
@@ -135,6 +144,8 @@ export function App({ backend }: { backend: Backend }) {
         return <ArtistView artistKey={view.key} />;
       case "history":
         return <HistoryView plays={p.history} />;
+      case "playlist":
+        return <PlaylistView id={view.key} />;
     }
   })();
 

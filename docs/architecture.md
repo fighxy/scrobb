@@ -788,11 +788,13 @@ CREATE TABLE jobs_dead (
 
 Защитно: `track` может прийти объектом, а не массивом (известная особенность JSON-сериализации Last.fm у ряда методов, для этого метода **не проверено**). Числа приходят строками.
 
-**Нормализация имён** (только для `match_key`, отображается оригинал):
+**Нормализация имён** (только для `match_key`, отображается оригинал). Поведение закреплено векторами [`contracts/match-key/v1.json`](../contracts/match-key/v1.json): их проходит ядро плеера (`scrobb-sync`), бэкенд должен проходить их же. Код ниже проходит все векторы `v1`.
 
 ```python
 import re, unicodedata, hashlib
-FEAT = re.compile(r"\s*[\(\[]?\s*(feat\.?|ft\.?|featuring|при уч\.?|при участии)\s+[^\)\]]*[\)\]]?", re.I)
+# \b: «Left Behind» и «Lift Off» — не вставки «ft»
+FEAT = re.compile(r"\s*[\(\[]?\s*\b(feat\.?|ft\.?|featuring|при уч\.?|при участии)\s+[^\)\]]*[\)\]]?", re.I)
+ARTIST_FEAT = re.compile(r"\s+(feat\.?|ft\.?|featuring|при уч\.?|при участии)\s+", re.I)
 
 def norm(s: str) -> str:
     s = unicodedata.normalize("NFKC", s).replace("ё", "е").replace("Ё", "Е")
@@ -800,11 +802,11 @@ def norm(s: str) -> str:
     return s
 
 def match_key(artist: str, title: str) -> bytes:
-    primary = re.split(r"\s+(feat\.?|ft\.?|&|,|x)\s+", artist, maxsplit=1, flags=re.I)[0]
+    primary = ARTIST_FEAT.split(artist, maxsplit=1)[0]
     return hashlib.sha256(f"{norm(primary)}\x1f{norm(FEAT.sub('', title))}".encode()).digest()
 ```
 
-Деление артиста по `&`, `,` и `x` агрессивное (ломает «Simon & Garfunkel»). Поэтому в MVP режем только `feat./ft.`, а разбор мультиартистов делается позже, по MusicBrainz artist credits.
+Артиста по `&`, `,` и `x` не делим: это ломает «Simon & Garfunkel». Режем только `feat./ft./featuring/при уч./при участии`, а разбор мультиартистов — позже, по MusicBrainz artist credits.
 
 **Сопоставление** (matcher, по приоритету): (1) MBID → `external_ids`; (2) `match_key` → `track_aliases`; (3) иначе создать «временные» artist/track и поставить в очередь обогащение. Нечёткий поиск (pg_trgm по `norm_name`) только *предлагает* слияния в фоне и никогда не применяется автоматически в горячем пути.
 
@@ -996,6 +998,7 @@ class ListenEvent:
     duration_ms: int | None = None
     loved: bool | None = None
     # внешние id: {"mb_recording": "...", "mb_artist": "...", "lastfm_url": "...", "isrc": "...", "yandex": "..."}
+    # ISRC Scrobb Player читает из тегов файла: без дефисов, в верхнем регистре
     ext_ids: dict[str, str] = field(default_factory=dict)
     source: str = "scrobb_lb"           # scrobb_lb | scrobb_as2 | scrobb_native | lastfm | …
     client: str | None = None           # submission_client / User-Agent клиента (Scrobb Extension, Web Scrobbler, Pano Scrobbler…)
@@ -1435,7 +1438,7 @@ CREATE TABLE user_achievements (
 | **Library** (все артисты/альбомы/треки, сортировка, поиск) | `user_entity_totals`; `GET /api/v1/users/{u}/library/{artists\|albums\|tracks}?sort=plays\|name\|last_played&q=` | MVP (артисты, треки), альбомы — later |
 | **Following / Followers** | `follows`; `GET /api/v1/users/{u}/following`, `…/followers`, `POST/DELETE /api/v1/me/follows/{u}` | MVP |
 | **Loved Tracks** | Импорт [`user.getLovedTracks`](https://www.last.fm/api/show/user.getLovedTracks) (пагинация, есть `date.uts`) в `favorites(entity_type = 3 /* трек */, source = 'lastfm')` при backfill и раз в сутки; `GET /api/v1/users/{u}/loved` | MVP |
-| **Playlists** | Не делаем (у Last.fm это рудимент; плейлисты живут в стримингах) | — |
+| **Playlists** | Не как у Last.fm (там это рудимент), а как продолжение плеера: плейлисты из Scrobb Player синхронизируются через аккаунт и уходят в стриминги; API в JSPF, совместимый с ListenBrainz `/1/playlist/*`. Предложение — [playlists.md](playlists.md) §8 | Этап 2 |
 
 ### 9.7 Shoutbox (комментарии на профиле)
 
@@ -1627,7 +1630,7 @@ API: `GET /api/v1/me/recommendations?type=all|artists|albums|tracks&cursor=`, `P
 - «Вспомнить забытое»;
 - уведомление «стрик под угрозой».
 
-**Не берём:** модель апселла Last.fm Pro (баннеры «Upgrade», paywall) и рекламные блоки — свой лёгкий тариф поддержки Scrobb Pro описан в §12; Labs; Playlists; кнопки play и встроенное проигрывание (у нас нет прав на стриминг — только ссылки); Events (пока); глобальные чарты (later, этап 5); Shoutbox и личные сообщения (этап 2+).
+**Не берём:** модель апселла Last.fm Pro (баннеры «Upgrade», paywall) и рекламные блоки — свой лёгкий тариф поддержки Scrobb Pro описан в §12; Labs; плейлисты в виде Last.fm (наши — из плеера, этап 2, [playlists.md](playlists.md)); кнопки play и встроенное проигрывание (у нас нет прав на стриминг — только ссылки); Events (пока); глобальные чарты (later, этап 5); Shoutbox и личные сообщения (этап 2+).
 
 ### 9.12 Приоритеты экранов
 

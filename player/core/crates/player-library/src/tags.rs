@@ -29,6 +29,7 @@ pub fn read_track(files: &dyn FileAccess, uri: &MediaUri, id: TrackId) -> Result
         track_no: None,
         disc_no: None,
         recording_mbid: None,
+        isrc: None,
         replay_gain: ReplayGain::default(),
     };
     // Обложки при сканировании не нужны, а в FLAC их бывает на мегабайты.
@@ -62,6 +63,7 @@ fn apply(track: &mut Track, tag: &Tag) {
     track.track_no = tag.track();
     track.disc_no = tag.disk();
     track.recording_mbid = text(tag, ItemKey::MusicBrainzRecordingId);
+    track.isrc = text(tag, ItemKey::Isrc).map(|isrc| isrc.replace('-', "").to_uppercase());
     track.replay_gain = ReplayGain {
         track_gain_db: number(tag, ItemKey::ReplayGainTrackGain),
         track_peak: number(tag, ItemKey::ReplayGainTrackPeak),
@@ -114,6 +116,8 @@ mod tests {
             track.recording_mbid.as_deref(),
             Some("6f1c2f5b-1c5c-4d6b-9a3e-0a1b2c3d4e5f")
         );
+        // ISRC приводится к каноническому виду: без дефисов, заглавными.
+        assert_eq!(track.isrc.as_deref(), Some("RUA018700012"));
         assert_eq!(
             track.replay_gain,
             ReplayGain {

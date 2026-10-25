@@ -441,6 +441,7 @@ mod tests {
             track_no: None,
             disc_no: None,
             recording_mbid: None,
+            isrc: None,
             replay_gain: Default::default(),
         }
     }

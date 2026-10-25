@@ -3,7 +3,8 @@
 //!
 //! История — отдельный файл `history.db`, не в базе библиотеки: библиотеку
 //! можно пересканировать, историю — нет, поэтому её бэкапят, экспортируют
-//! и мигрируют отдельно (`docs/player-history.md`).
+//! и мигрируют отдельно (`docs/player-history.md`). Плейлисты — в `user.db`
+//! ([`SqlitePlaylists`], `docs/playlists.md`) по той же причине.
 //!
 //! Режим WAL, один писатель и параллельные читатели; версия схемы —
 //! `PRAGMA user_version`, миграции — по порядку, каждая в своей транзакции.
@@ -19,6 +20,10 @@ use player_history::{
 };
 use rusqlite::types::Type;
 use rusqlite::{Connection, OptionalExtension, Row, params};
+
+mod playlists;
+
+pub use playlists::SqlitePlaylists;
 
 /// Миграции схемы истории: элемент `i` переводит базу с версии `i` на `i + 1`.
 const MIGRATIONS: &[&str] = &[
@@ -95,15 +100,8 @@ impl SqliteHistory {
     }
 
     fn init(mut conn: Connection) -> Result<Self, HistoryError> {
-        // В памяти WAL не бывает: SQLite отвечает `memory`, это не ошибка.
-        conn.pragma_update_and_check(None, "journal_mode", "WAL", |r| r.get::<_, String>(0))
-            .map_err(err)?;
-        conn.pragma_update(None, "synchronous", "NORMAL")
-            .map_err(err)?;
-        conn.pragma_update(None, "foreign_keys", "ON")
-            .map_err(err)?;
-        conn.busy_timeout(Duration::from_secs(5)).map_err(err)?;
-        migrate(&mut conn)?;
+        configure(&conn).map_err(err)?;
+        migrate(&mut conn, MIGRATIONS).map_err(HistoryError)?;
         let device_id = device_id(&conn).map_err(err)?;
         Ok(Self {
             conn: Mutex::new(conn),
@@ -116,21 +114,32 @@ impl SqliteHistory {
     }
 }
 
-fn migrate(conn: &mut Connection) -> Result<(), HistoryError> {
+/// WAL, `synchronous=NORMAL`, внешние ключи, ожидание блокировки.
+fn configure(conn: &Connection) -> rusqlite::Result<()> {
+    // В памяти WAL не бывает: SQLite отвечает `memory`, это не ошибка.
+    conn.pragma_update_and_check(None, "journal_mode", "WAL", |r| r.get::<_, String>(0))?;
+    conn.pragma_update(None, "synchronous", "NORMAL")?;
+    conn.pragma_update(None, "foreign_keys", "ON")?;
+    conn.busy_timeout(Duration::from_secs(5))
+}
+
+/// Миграции по `PRAGMA user_version`; базу новее приложения не трогаем.
+fn migrate(conn: &mut Connection, migrations: &[&str]) -> Result<(), String> {
+    let s = |e: rusqlite::Error| e.to_string();
     let version: usize = conn
         .pragma_query_value(None, "user_version", |r| r.get(0))
-        .map_err(err)?;
-    if version > MIGRATIONS.len() {
-        return Err(HistoryError(format!(
+        .map_err(s)?;
+    if version > migrations.len() {
+        return Err(format!(
             "база версии {version} новее приложения (знает до {})",
-            MIGRATIONS.len()
-        )));
+            migrations.len()
+        ));
     }
-    for (i, sql) in MIGRATIONS.iter().enumerate().skip(version) {
-        let tx = conn.transaction().map_err(err)?;
-        tx.execute_batch(sql).map_err(err)?;
-        tx.pragma_update(None, "user_version", i + 1).map_err(err)?;
-        tx.commit().map_err(err)?;
+    for (i, sql) in migrations.iter().enumerate().skip(version) {
+        let tx = conn.transaction().map_err(s)?;
+        tx.execute_batch(sql).map_err(s)?;
+        tx.pragma_update(None, "user_version", i + 1).map_err(s)?;
+        tx.commit().map_err(s)?;
     }
     Ok(())
 }

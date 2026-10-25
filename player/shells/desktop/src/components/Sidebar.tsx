@@ -1,5 +1,6 @@
 import {
   Disc3,
+  FileUp,
   Folder,
   FolderPlus,
   History,
@@ -13,8 +14,11 @@ import {
   UsersRound,
   X,
 } from "lucide-react";
-import type { ComponentType } from "react";
+import { type ComponentType, useState } from "react";
+import { useApp } from "@/app-context";
 import { IconButton } from "@/components/common";
+import { Mosaic } from "@/components/playlist-ui";
+import { DRAG_TRACKS } from "@/components/TrackTable";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -26,11 +30,12 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import type { Scanning } from "@/core";
-import { folderName } from "@/format";
+import type { Scanning, TrackId } from "@/core";
+import { count, folderName, TRACKS } from "@/format";
 import type { View } from "@/lib/nav";
 import type { Theme } from "@/lib/theme";
 import { cn } from "@/lib/utils";
+import { RenameDialog } from "@/views/Playlist";
 
 interface Props {
   view: View;
@@ -58,6 +63,7 @@ const SECTIONS: Array<{ kind: "tracks" | "albums" | "artists" | "history"; label
 function section(view: View): string {
   return view.kind === "album" ? "albums" : view.kind === "artist" ? "artists" : view.kind;
 }
+
 
 /** Левая панель: разделы библиотеки, папки-источники, тема. */
 export function Sidebar(props: Props) {
@@ -106,7 +112,7 @@ export function Sidebar(props: Props) {
         </ul>
       </div>
       <div className="flex min-h-0 flex-1 flex-col rounded-lg bg-surface p-2">
-        {compact ? <CompactFolders {...props} /> : <Folders {...props} />}
+        {compact ? <CompactLibrary {...props} /> : <Library {...props} />}
         <div className={cn("mt-auto flex items-center pt-2", compact ? "justify-center" : "justify-between px-1")}>
           {!compact && (
             <button type="button" onClick={props.onAddFiles} className="flex items-center gap-2 rounded-md px-2 py-1 text-[13px] text-muted-foreground hover:text-foreground">
@@ -121,19 +127,187 @@ export function Sidebar(props: Props) {
   );
 }
 
-function Folders({ folders, scanning, onAddFolder, onRemoveFolder, onRescan }: Props) {
+/** Нижняя часть панели: плейлисты или папки — переключателем, как фильтры медиатеки. */
+function Library(props: Props) {
+  const [tab, setTab] = useState<"playlists" | "folders">("playlists");
+  const { folders, scanning, onAddFolder, onRescan } = props;
+  const chip = (value: typeof tab, label: string) => (
+    <button
+      type="button"
+      aria-pressed={tab === value}
+      onClick={() => setTab(value)}
+      className={cn(
+        "h-8 rounded-full px-3 text-[13px] font-semibold transition-colors",
+        tab === value ? "bg-foreground text-background" : "bg-surface-raised text-foreground hover:bg-surface-hover",
+      )}
+    >
+      {label}
+    </button>
+  );
   return (
     <>
-      <div className="flex h-10 items-center gap-1 pl-3">
-        <h2 className="flex-1 font-semibold text-muted-foreground">Папки</h2>
-        <IconButton label="Найти новые и удалённые файлы" onClick={onRescan} disabled={!folders.length || !!scanning}>
-          <RefreshCw className={cn(scanning && "animate-spin")} />
-        </IconButton>
-        <IconButton label="Добавить папку" onClick={onAddFolder}>
-          <FolderPlus />
-        </IconButton>
+      <div className="flex h-10 items-center gap-1.5 pl-1">
+        {chip("playlists", "Плейлисты")}
+        {chip("folders", "Папки")}
+        <span className="flex-1" />
+        {tab === "playlists" ? (
+          <PlaylistActions />
+        ) : (
+          <>
+            <IconButton label="Найти новые и удалённые файлы" onClick={onRescan} disabled={!folders.length || !!scanning}>
+              <RefreshCw className={cn(scanning && "animate-spin")} />
+            </IconButton>
+            <IconButton label="Добавить папку" onClick={onAddFolder}>
+              <FolderPlus />
+            </IconButton>
+          </>
+        )}
       </div>
       {scanning && <ScanProgress scanning={scanning} />}
+      <div className="mt-1 flex min-h-0 flex-1 flex-col">
+        {tab === "playlists" ? <PlaylistList {...props} /> : <Folders {...props} />}
+      </div>
+    </>
+  );
+}
+
+/** «Импорт» и «Создать»; новый плейлист сразу открывается. */
+function PlaylistActions({ compact }: { compact?: boolean }) {
+  const app = useApp();
+  const [creating, setCreating] = useState(false);
+  return (
+    <>
+      <IconButton
+        label="Импорт плейлиста: M3U, PLS, XSPF, JSPF, CSV, текст"
+        className={cn(compact && "size-10")}
+        onClick={() => void app.playlists.import().then((p) => p && app.go({ kind: "playlist", key: p.id }))}
+      >
+        <FileUp />
+      </IconButton>
+      <IconButton label="Создать плейлист" className={cn(compact && "size-10")} onClick={() => setCreating(true)}>
+        <Plus />
+      </IconButton>
+      <RenameDialog
+        open={creating}
+        onOpenChange={setCreating}
+        heading="Новый плейлист"
+        title={`Плейлист №${app.playlists.playlists.length + 1}`}
+        description={null}
+        onSave={(title, description) =>
+          void app.playlists.create([], title).then(async (p) => {
+            if (!p) return;
+            if (description) await app.playlists.update(p.id, title, description);
+            app.go({ kind: "playlist", key: p.id });
+          })
+        }
+      />
+    </>
+  );
+}
+
+/** На плейлист можно бросить треки, перетащив их из таблицы. */
+function useDropTracks(id: string) {
+  const app = useApp();
+  const [over, setOver] = useState(false);
+  return {
+    over,
+    props: {
+      onDragOver: (e: React.DragEvent) => {
+        if (!e.dataTransfer.types.includes(DRAG_TRACKS)) return;
+        e.preventDefault();
+        e.dataTransfer.dropEffect = "copy";
+        setOver(true);
+      },
+      onDragLeave: () => setOver(false),
+      onDrop: (e: React.DragEvent) => {
+        setOver(false);
+        const raw = e.dataTransfer.getData(DRAG_TRACKS);
+        if (!raw) return;
+        e.preventDefault();
+        const ids = (JSON.parse(raw) as TrackId[]).filter((t) => t >= 0);
+        if (ids.length) void app.playlists.add(id, ids);
+      },
+    },
+  };
+}
+
+function PlaylistRow({ id, title, items, covers, active }: { id: string; title: string; items: number; covers: TrackId[]; active: boolean }) {
+  const app = useApp();
+  const drop = useDropTracks(id);
+  return (
+    <li>
+      <button
+        type="button"
+        aria-current={active ? "page" : undefined}
+        onClick={() => app.go({ kind: "playlist", key: id })}
+        {...drop.props}
+        className={cn(
+          "flex h-14 w-full items-center gap-3 rounded-md px-2 text-left transition-colors hover:bg-surface-hover",
+          active && "bg-surface-raised",
+          drop.over && "bg-primary/20 ring-2 ring-primary",
+        )}
+      >
+        <Mosaic covers={covers} className="size-11 rounded" />
+        <span className="min-w-0 flex-1">
+          <span className={cn("block truncate font-medium", active && "text-primary")}>{title}</span>
+          <span className="block truncate text-xs text-muted-foreground">Плейлист · {count(items, TRACKS)}</span>
+        </span>
+      </button>
+    </li>
+  );
+}
+
+function PlaylistList({ view }: Props) {
+  const app = useApp();
+  const [creating, setCreating] = useState(false);
+  const list = app.playlists.playlists;
+  if (list.length === 0) {
+    return (
+      <div className="mx-1 rounded-md bg-surface-raised p-4 text-[13px]">
+        <p className="font-semibold">Создайте первый плейлист</p>
+        <p className="mt-1 text-muted-foreground">Или перенесите готовый: M3U из плеера, CSV или список из стриминга, JSPF из ListenBrainz.</p>
+        <div className="mt-3 flex flex-wrap gap-2">
+          <button type="button" onClick={() => setCreating(true)} className="rounded-full bg-foreground px-4 py-1.5 text-[13px] font-semibold text-background hover:scale-[1.03]">
+            Создать
+          </button>
+          <button
+            type="button"
+            onClick={() => void app.playlists.import().then((p) => p && app.go({ kind: "playlist", key: p.id }))}
+            className="rounded-full px-3 py-1.5 text-[13px] font-semibold hover:bg-surface-hover"
+          >
+            Импорт из файла
+          </button>
+        </div>
+        <RenameDialog
+          open={creating}
+          onOpenChange={setCreating}
+          heading="Новый плейлист"
+          title="Плейлист №1"
+          description={null}
+          onSave={(title) => void app.playlists.create([], title).then((p) => p && app.go({ kind: "playlist", key: p.id }))}
+        />
+      </div>
+    );
+  }
+  return (
+    <ul className="-mr-1 flex min-h-0 flex-col gap-0.5 overflow-y-auto pr-1" aria-label="Плейлисты">
+      {list.map((p) => (
+        <PlaylistRow
+          key={p.playlist.id}
+          id={p.playlist.id}
+          title={p.playlist.title}
+          items={p.items}
+          covers={p.covers}
+          active={view.kind === "playlist" && view.key === p.playlist.id}
+        />
+      ))}
+    </ul>
+  );
+}
+
+function Folders({ folders, scanning, onAddFolder, onRemoveFolder }: Props) {
+  return (
+    <>
       <ul className="-mr-1 flex min-h-0 flex-col gap-0.5 overflow-y-auto pr-1" aria-label="Папки библиотеки">
         {folders.map((f) => (
           <li key={f} className="group flex h-12 items-center gap-3 rounded-md px-2 hover:bg-surface-hover" title={f}>
@@ -181,6 +355,46 @@ function ScanProgress({ scanning }: { scanning: Scanning }) {
         {scanning.read ? `прочитано ${scanning.read} из ${scanning.found}` : `найдено ${scanning.found}`}
       </div>
     </div>
+  );
+}
+
+/** Узкая полоса: плейлисты — обложками, папки — в меню. */
+function CompactLibrary(props: Props) {
+  const app = useApp();
+  return (
+    <div className="flex min-h-0 flex-col items-center gap-1">
+      <CompactFolders {...props} />
+      <PlaylistActions compact />
+      <ul className="flex min-h-0 flex-col items-center gap-1 overflow-y-auto" aria-label="Плейлисты">
+        {app.playlists.playlists.map((p) => (
+          <CompactPlaylist key={p.playlist.id} id={p.playlist.id} title={p.playlist.title} covers={p.covers} active={props.view.kind === "playlist" && props.view.key === p.playlist.id} />
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function CompactPlaylist({ id, title, covers, active }: { id: string; title: string; covers: TrackId[]; active: boolean }) {
+  const app = useApp();
+  const drop = useDropTracks(id);
+  return (
+    <li>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <button
+            type="button"
+            aria-label={title}
+            aria-current={active ? "page" : undefined}
+            onClick={() => app.go({ kind: "playlist", key: id })}
+            {...drop.props}
+            className={cn("rounded-md p-0.5 transition-colors hover:bg-surface-hover", (active || drop.over) && "ring-2 ring-primary")}
+          >
+            <Mosaic covers={covers} className="size-10 rounded" />
+          </button>
+        </TooltipTrigger>
+        <TooltipContent side="right">{title}</TooltipContent>
+      </Tooltip>
+    </li>
   );
 }
 

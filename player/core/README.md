@@ -10,20 +10,21 @@ player/core/                 Cargo workspace
     scrobb-api/              DTO родного API Scrobb (§18.3, §18.4)            ─┐
     scrobb-rules/            правило скроббла и «сейчас играет» (§18.7)         │ ярус Scrobb:
     scrobb-client/           клиент API без ввода-вывода (sans-IO), повторы     │ собирается под wasm32
-    scrobb-sync/             синхронизация рейтингов и плейлистов (заготовка)  ─┘
-    player-domain/           треки, состояние, окна списков                    ─┐ общий ярус плеера:
+    scrobb-sync/             ключ трека (match-key); синхронизация — заготовка ─┘
+    player-domain/           треки, снимок трека, состояние, окна списков      ─┐ общий ярус плеера:
     player-playback/         очередь, повтор, взгляд вперёд                     │ собирается под wasm32
-    player-history/          история: модель, трейт хранилища, скробблы        ─┘
+    player-history/          история: модель, трейт хранилища, скробблы         │
+    player-playlists/        плейлисты: модель, порядок, хранилище, форматы    ─┘
     player-ports/            порты: звук, медиасессия, файлы, секреты, сеть, часы ─┐
     player-engine/           звуковой движок: gapless, ReplayGain, перемотка      │ нативный
     player-output-cpal/      вывод звука через cpal (адаптер порта AudioOutput)   │
-    player-library/          трек по id, папки, теги, обложки; SQLite — позже     │ ярус плеера
-    player-store-sqlite/     SQLite: история прослушиваний и очередь отправки     │
+    player-library/          трек по id, поиск трека, папки, теги, обложки        │ ярус плеера
+    player-store-sqlite/     SQLite: history.db (история, очередь), user.db (плейлисты) │
     player-metadata/         MusicBrainz, AcoustID, кодировки (заготовка)         │
     player-plugins/          хост WASM-плагинов (заготовка)                       │
     player-core/             фасад: очередь + библиотека + движок + история      ─┘
     player-testkit/          обвязка тестов: ручной вывод звука, часы, фикстуры,
-                             общие проверки хранилищ истории, папки на диске
+                             общие проверки хранилищ истории и плейлистов, папки на диске
   bindings/
     ffi/                     → Swift и Kotlin для нативных оболочек (UniFFI, позже)
     wasm/                    → npm-пакет для веб-приложения Scrobb и расширения (wasm-bindgen, позже)
@@ -36,7 +37,7 @@ player/core/                 Cargo workspace
 | Ярус | Крейты | Кто использует | Ограничения |
 |---|---|---|---|
 | **Scrobb** | `scrobb-api`, `scrobb-rules`, `scrobb-client`, `scrobb-sync` | Плеер; десктоп-клиент Scrobb на Tauri (тоже Rust, [architecture.md](../../docs/architecture.md) §18.12); веб-приложение и расширение через `bindings/wasm` | Без ввода-вывода, системного времени и потоков; собирается под `wasm32-unknown-unknown`; не зависит от `player-*` |
-| **Плеер, общий** | `player-domain`, `player-playback`, `player-history` | Ядро плеера; при желании — веб (например, веб-плеер на сайте) | Те же, что у яруса Scrobb |
+| **Плеер, общий** | `player-domain`, `player-playback`, `player-history`, `player-playlists` | Ядро плеера; при желании — веб (например, веб-плеер на сайте) | Те же, что у яруса Scrobb |
 | **Плеер, нативный** | `player-ports`, `player-engine`, `player-output-cpal`, `player-library`, `player-store-sqlite`, `player-metadata`, `player-plugins`, `player-core` | Только плеер | Всё платформенное — только через порты |
 | **Привязки** | `bindings/ffi`, `bindings/wasm` | Оболочки на SwiftUI и Compose; веб и расширение | Наружу — только фасад `player-core` (ffi) и ярус Scrobb (wasm) |
 
@@ -52,7 +53,7 @@ player/core/                 Cargo workspace
 
 - **Протокол — один на все клиенты.** DTO родного API лежат в `scrobb-api`, а `scrobb-client` строит и разбирает запросы, не выполняя их. Поэтому один код работает в плеере (порт `HttpTransport`), в Tauri-клиенте и в браузере (`fetch`).
 - **Правило скроббла проверяется по одним векторам.** `scrobb-rules` прогоняется по [`contracts/scrobble-rules/v1.json`](../../contracts/scrobble-rules/v1.json). Эти же векторы должны проходить бэкенд (повторная проверка, §11.1, шаг 6) и TypeScript-код расширения.
-- **Синхронизация.** `scrobb-sync` описывает рейтинги и «любимые», которые веб-приложение будет показывать и править. Для этого нужны эндпоинты синхронизации на сервере и общая с бэкендом нормализация ключа трека (`contracts/`, `match-key` — план).
+- **Синхронизация.** `scrobb-sync` описывает рейтинги, «любимые» и плейлисты, которые веб-приложение будет показывать и править. Ключ трека уже общий: `scrobb-sync::TrackKey` проходит векторы [`contracts/match-key/v1.json`](../../contracts/match-key/v1.json), их же должен проходить бэкенд. Нужны эндпоинты синхронизации на сервере ([playlists.md](../../docs/playlists.md) §8).
 - **Что нужно от бэкенда, когда плеер появится:**
   - новое значение `player` в `source.kind` и `client_kind` (сейчас только `extension` и `desktop`, §18.3);
   - эндпоинты синхронизации;
@@ -165,6 +166,57 @@ cargo run --release -p player-output-cpal --example play -- --rate=48000 a.flac 
 
 Проверено, что тесты ловят ошибки: каждая из 15 внесённых поломок (6 — в истории и отправке, 9 — в привязке и «сейчас играет») роняет хотя бы один тест.
 
+## Плейлисты
+
+Стандарты, выбор форматов, модель и предложение для сервера — в [playlists.md](../../docs/playlists.md). Коротко:
+
+- **Крейт `player-playlists`** собирается под wasm32. В нём:
+  - модель: `Playlist`, `PlaylistItem` со снимком трека (`TrackSnapshot`) и путём на этом устройстве;
+  - трейт `PlaylistStore` и `MemoryPlaylists`;
+  - дробные ключи порядка `order::{between, spread}`: base-62, вставка и перестановка не трогают соседей;
+  - пути `paths`: относительные, `\` и `/`, `file://`-URI, диски Windows и UNC;
+  - **форматы `formats`** — `detect`, `parse`, `write`:
+    - M3U/M3U8 (BOM, CRLF, `#EXTINF`, `#PLAYLIST`, `#EXTALB`, `#EXTART`, CP1251);
+    - PLS (только чтение);
+    - XSPF (`quick-xml`);
+    - JSPF с расширениями MusicBrainz и `https://scrobb.ru/jspf#…`;
+    - CSV как у Exportify (колонки по названиям, `,` `;` таб, RFC 4180);
+    - TXT «Артист - Название».
+- **Хранилище — `SqlitePlaylists`**, отдельный файл `user.db`: правки пользователя, их не пересобрать сканированием. Таблицы `STRICT`, WAL, миграции по `user_version`, удаление — надгробием. Оба хранилища проходят `player-testkit::playlists::conformance`.
+- **Поиск трека в библиотеке** — `player-library::LibraryIndex`, через `TrackStore::resolve`. Порядок:
+  1. путь, точный или без учёта регистра и разделителей;
+  2. MBID;
+  3. ISRC;
+  4. ключ «артист + название» (`scrobb-sync::TrackKey`).
+
+  Из нескольких кандидатов выбирается тот же альбом, затем ближайшая длительность; расхождение больше 10 с — другая запись. ISRC теперь читается из тегов (`Track::isrc`) и попадает в `ext_ids` снимка — значит, и в скробблы.
+- **Фасад:**
+  - `playlists()` — сводка с обложками для мозаики;
+  - `playlist(id)` — элементы с `track_id`, если трек нашёлся;
+  - `create_playlist`, `update_playlist`, `delete_playlist`;
+  - `add_to_playlist`, `remove_from_playlist`, `move_in_playlist`;
+  - `import_playlist(file_name, bytes, base_dir)` → `{ playlist, total, matched }`;
+  - `export_playlist(id, format, target_dir)` → текст и число пропущенных.
+
+  Ошибки — `CoreError::Playlist`. id — UUIDv7 от ядра.
+
+Тесты:
+- **форматы** — живые образцы:
+  - M3U8 из foobar2000 с BOM и относительными путями;
+  - M3U из AIMP в CP1251 с путями через `\`;
+  - XSPF из VLC с `file://` и сущностями;
+  - JSPF-пример MusicBrainz и ListenBrainz;
+  - CSV из Exportify (старый и нынешний заголовок) и из Excel с `;`;
+  - TXT и PLS;
+  - запись и чтение каждого формата экспорта туда и обратно;
+- **порядок** — 3000 случайных вставок и 10 000 ключей не длиннее 3 символов;
+- **хранилища** — общие проверки, переоткрытие базы, отказ открыть более новую схему, атомарность пачки;
+- **поиск в библиотеке** — приоритеты, «ё», регистр, `feat.`, выбор по альбому и длительности, замена и удаление трека;
+- **фасад** — создать, добавить, открыть (найдено и не найдено), переставить, импорт, экспорт;
+- **JSON для окна** — `crates/player-core/tests/json.rs`.
+
+Внесённые поломки ловятся тестами: в порядке, путях, CP1251, разделителе CSV, расширении JSPF, `#EXTART`, приоритетах и выборе в индексе, надгробиях SQLite, границе слова и casefold в ключе, перестановке и слиянии при импорте.
+
 ## Оболочки
 
 - **Десктоп** — [`player/shells/desktop`](../shells/desktop/README.md): Tauri 3 + React. Ядро подключено крейтом, без FFI; типы ядра для этого сериализуются (`serde`), формат закреплён тестом `crates/player-core/tests/json.rs`.
@@ -188,4 +240,5 @@ cargo run --release -p player-output-cpal --example play -- --rate=48000 a.flac 
 Лицензии зависимостей:
 - движок: Symphonia — MPL-2.0 (копилефт на уровне файлов: изменения в её файлах нужно публиковать, наш код — нет), rtrb и rubato — MIT/Apache-2.0, cpal — Apache-2.0;
 - история: rusqlite — MIT, сама SQLite — общественное достояние, uuid и getrandom — MIT/Apache-2.0;
-- теги: lofty — MIT/Apache-2.0.
+- теги: lofty — MIT/Apache-2.0;
+- плейлисты и ключ трека: quick-xml — MIT, unicode-normalization — MIT/Apache-2.0.

@@ -34,6 +34,7 @@ player-core = { path = "../../../core/crates/player-core" }
 player-domain = { path = "../../../core/crates/player-domain" }
 player-history = { path = "../../../core/crates/player-history" }
 player-library = { path = "../../../core/crates/player-library" }
+player-playlists = { path = "../../../core/crates/player-playlists" }
 player-ports = { path = "../../../core/crates/player-ports" }
 scrobb-client = { path = "../../../core/crates/scrobb-client" }
 player-output-cpal = { path = "../../../core/crates/player-output-cpal" }

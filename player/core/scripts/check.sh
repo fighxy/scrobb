@@ -7,7 +7,7 @@ cd "$(dirname "$0")/.."
 
 # Крейты, которые обязаны собираться под WebAssembly: их использует веб-приложение
 # Scrobb и расширение через bindings/wasm (README.md, «Ярусы»).
-WEB_SAFE=(scrobb-api scrobb-rules scrobb-client scrobb-sync scrobb-wasm player-domain player-playback player-history)
+WEB_SAFE=(scrobb-api scrobb-rules scrobb-client scrobb-sync scrobb-wasm player-domain player-playback player-history player-playlists)
 
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings

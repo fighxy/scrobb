@@ -5,10 +5,15 @@
 //! а не по пути. Те же записи будет показывать и править веб-приложение
 //! Scrobb, поэтому крейт относится к ярусу Scrobb и собирается под wasm.
 //!
-//! Сервер для этого ещё не спроектирован: нужны эндпоинты синхронизации и
-//! общая с бэкендом нормализация ключа (`contracts/README.md`, `match-key`).
+//! Сервер для этого ещё не спроектирован: нужны эндпоинты синхронизации.
+//! Нормализация ключа уже общая с бэкендом: [`norm`] и [`TrackKey::new`]
+//! сверяются с векторами `contracts/match-key/v1.json`.
 
 use serde::{Deserialize, Serialize};
+
+mod key;
+
+pub use key::{norm, primary_artist, strip_feat};
 
 /// Ключ трека, общий для всех устройств и сервера.
 ///
@@ -23,6 +28,18 @@ pub struct TrackKey {
     /// MusicBrainz recording ID — если есть, он важнее текстового ключа.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recording_mbid: Option<String>,
+}
+
+impl TrackKey {
+    /// Ключ из метаданных: главный артист и название без «feat. …»,
+    /// нормализованные как на сервере (`docs/architecture.md` §5.3).
+    pub fn new(artist: &str, title: &str, recording_mbid: Option<&str>) -> Self {
+        Self {
+            artist: norm(primary_artist(artist)),
+            title: norm(&strip_feat(title)),
+            recording_mbid: recording_mbid.map(str::to_owned),
+        }
+    }
 }
 
 /// Гибридные логические часы: упорядочивают правки с разных устройств

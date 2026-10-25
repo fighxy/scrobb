@@ -29,6 +29,7 @@ ff -i a.flac -c copy -map_metadata -1 \
   -metadata MUSICBRAINZ_TRACKID="6f1c2f5b-1c5c-4d6b-9a3e-0a1b2c3d4e5f" \
   -metadata REPLAYGAIN_TRACK_GAIN="-6.50 dB" -metadata REPLAYGAIN_TRACK_PEAK="0.988" \
   -metadata REPLAYGAIN_ALBUM_GAIN="-7.25 dB" -metadata REPLAYGAIN_ALBUM_PEAK="0.999" \
+  -metadata ISRC="ru-a01-87-00012" \
   tagged.flac
 # Встроенная обложка (картинка 64×64 цвета 0xc0392b, тип «Cover (front)»): тот же a.flac.
 # Картинка — сначала в файл: `-frames:v 1` при прикреплении оборвал бы и звук.

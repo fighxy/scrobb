@@ -9,7 +9,8 @@ export type View =
   | { kind: "artists" }
   | { kind: "history" }
   | { kind: "album"; key: string }
-  | { kind: "artist"; key: string };
+  | { kind: "artist"; key: string }
+  | { kind: "playlist"; key: string };
 
 export interface Nav {
   stack: View[];

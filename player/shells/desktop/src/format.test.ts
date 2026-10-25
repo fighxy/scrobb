@@ -30,7 +30,7 @@ describe("livePosition", () => {
     const short = state({
       current: {
         id: 1, uri: "", title: "", artists: [], album: null, album_artist: null,
-        duration_ms: 11_000, track_no: null, disc_no: null, recording_mbid: null,
+        duration_ms: 11_000, track_no: null, disc_no: null, recording_mbid: null, isrc: null,
         replay_gain: { track_gain_db: null, track_peak: null, album_gain_db: null, album_peak: null },
       },
     });

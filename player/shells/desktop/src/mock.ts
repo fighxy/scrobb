@@ -5,7 +5,8 @@
 // Параметры адреса: `?demo=empty` — пустая библиотека; `?demo=playing` —
 // сразу играет трек; `?demo=linking` — открыто окно привязки;
 // `?demo=scanning` — идёт сканирование папки; `?demo=big` — 10 000 треков
-// (проверка плавности прокрутки).
+// (проверка плавности прокрутки); `?demo=playlist` — запуск с плейлистом,
+// в котором есть треки не из библиотеки.
 //
 // Обложки — SVG-градиенты с оттенком от названия альбома; у одного альбома
 // обложки нет, чтобы была видна заглушка.
@@ -15,7 +16,11 @@ import type {
   Backend,
   Command,
   CoreEvent,
+  ItemId,
   LibraryEvent,
+  Playlist,
+  PlaylistEntry,
+  PlaylistFormat,
   PlayerState,
   PlayRecord,
   Scanning,
@@ -23,7 +28,9 @@ import type {
   Snapshot,
   Track,
   TrackId,
+  TrackSnapshot,
 } from "./core";
+import { EXPORT_FORMATS } from "./core";
 
 const DEMO: Array<[string, string, string, number]> = [
   ["Кукушка", "Кино", "Чёрный альбом", 397_000],
@@ -52,6 +59,7 @@ function track(i: number, [title, artist, album, duration]: (typeof DEMO)[number
     track_no: (i % 9) + 1,
     disc_no: null,
     recording_mbid: null,
+    isrc: null,
     replay_gain: { track_gain_db: null, track_peak: null, album_gain_db: null, album_peak: null },
   };
 }
@@ -97,6 +105,35 @@ function bigLibrary(): Track[] {
     const album = `Альбом ${Math.floor(i / 12.5) + 1}`;
     return track(i, [`${title} (${i + 1})`, artist, album, 150_000 + ((i * 7919) % 240_000)]);
   });
+}
+
+function snapshotOf(t: Track): TrackSnapshot {
+  return {
+    title: t.title,
+    artists: t.artists,
+    album: t.album,
+    album_artist: t.album_artist,
+    duration_ms: t.duration_ms,
+    recording_mbid: t.recording_mbid,
+    ext_ids: {},
+  };
+}
+
+/** Трек «из стриминга», которого нет в библиотеке. */
+function foreign(title: string, artist: string, album: string, ms: number): TrackSnapshot {
+  return { title, artists: [artist], album, album_artist: null, duration_ms: ms, recording_mbid: null, ext_ids: {} };
+}
+
+interface MockPlaylist {
+  playlist: Playlist;
+  items: Array<Omit<PlaylistEntry, "track_id">>;
+}
+
+declare global {
+  interface Window {
+    /** Последний экспорт подменного ядра — для проверок в Playwright. */
+    __lastExport?: { format: PlaylistFormat; path: string; text: string };
+  }
 }
 
 export function createMockBackend(search = location.search): Backend {
@@ -161,6 +198,74 @@ export function createMockBackend(search = location.search): Backend {
     origin: "player",
   }));
   let startedAt = performance.now();
+
+  // Плейлисты: в одном есть треки «из Spotify», которых нет в библиотеке.
+  let nextId = 1;
+  const id = () => `mock-${nextId++}`;
+  const entry = (track: TrackSnapshot, location: string | null): MockPlaylist["items"][number] => ({
+    id: id(),
+    position: String(nextId).padStart(6, "0"),
+    added_at_ms: now,
+    location,
+    track,
+  });
+  const fromLibrary = (ids: number[]) =>
+    ids.flatMap((i) => {
+      const t = tracks.find((x) => x.id === i);
+      return t ? [entry(snapshotOf(t), t.uri)] : [];
+    });
+  const makePlaylist = (title: string, items: MockPlaylist["items"], origin: string | null = null, age = 0): MockPlaylist => ({
+    playlist: { id: id(), title, description: null, origin, created_at_ms: now - age, updated_at_ms: now - age },
+    items,
+  });
+  let playlists: MockPlaylist[] =
+    demo === "empty"
+      ? []
+      : [
+          makePlaylist("Вечер на кухне", fromLibrary([8, 6, 2, 9, 4]), null, 1000),
+          makePlaylist(
+            "Импорт из Spotify",
+            [
+              ...fromLibrary([1]),
+              entry(foreign("Bohemian Rhapsody", "Queen", "A Night at the Opera", 354_000), null),
+              ...fromLibrary([7]),
+              entry(foreign("Blinding Lights", "The Weeknd", "After Hours", 200_000), null),
+            ],
+            "import:csv",
+            2000,
+          ),
+          makePlaylist("Кино — лучшее", fromLibrary([1, 2, 3, 5, 11, 12]), null, 3000),
+        ];
+  const resolve = (item: MockPlaylist["items"][number]): TrackId | null =>
+    tracks.find((t) => t.uri === item.location)?.id ??
+    tracks.find(
+      (t) =>
+        t.title.toLowerCase() === item.track.title.toLowerCase() &&
+        t.artists[0]?.toLowerCase() === item.track.artists[0]?.toLowerCase(),
+    )?.id ??
+    null;
+  const findPlaylist = (pid: string) => {
+    const p = playlists.find((x) => x.playlist.id === pid);
+    if (!p) throw { type: "playlist", data: `нет плейлиста ${pid}` };
+    return p;
+  };
+  const touch = (p: MockPlaylist) => {
+    p.playlist = { ...p.playlist, updated_at_ms: Date.now() };
+  };
+  const covers = (p: MockPlaylist) => {
+    const albums = new Set<string>();
+    const out: TrackId[] = [];
+    for (const item of p.items) {
+      const tid = resolve(item);
+      const t = tracks.find((x) => x.id === tid);
+      if (!t || out.length === 4) continue;
+      const album = t.album ?? `#${t.id}`;
+      if (albums.has(album)) continue;
+      albums.add(album);
+      out.push(t.id);
+    }
+    return out;
+  };
 
   const emit = (event: CoreEvent) => setTimeout(() => listeners.forEach((l) => l(event)), 0);
   const position = () =>
@@ -238,7 +343,15 @@ export function createMockBackend(search = location.search): Backend {
       }
     },
     async snapshot(): Promise<Snapshot> {
-      return { state: { ...state, position_ms: position() }, tracks, folders, scanning, scrobbling, scrobbling_available: true };
+      return {
+        state: { ...state, position_ms: position() },
+        tracks,
+        folders,
+        scanning,
+        scrobbling,
+        scrobbling_available: true,
+        opened_playlist: demo === "playlist" ? (playlists.find((p) => p.playlist.title === "Импорт из Spotify")?.playlist.id ?? null) : null,
+      };
     },
     async pickFiles() {
       return ["/music/Кино/Последний герой/Бездельник.flac", "/music/Земфира/Земфира/Ариведерчи.mp3"];
@@ -297,5 +410,89 @@ export function createMockBackend(search = location.search): Backend {
       return hslToHex(hue(t.album), 0.55, 0.3);
     },
     async revealInFolder() {},
+    async playlists() {
+      return [...playlists]
+        .sort((a, b) => b.playlist.updated_at_ms - a.playlist.updated_at_ms)
+        .map((p) => ({
+          playlist: p.playlist,
+          items: p.items.length,
+          duration_ms: p.items.reduce((sum, i) => sum + (i.track.duration_ms ?? 0), 0),
+          covers: covers(p),
+        }));
+    },
+    async playlist(pid) {
+      const p = findPlaylist(pid);
+      return { playlist: p.playlist, items: p.items.map((i) => ({ ...i, track_id: resolve(i) })) };
+    },
+    async createPlaylist(title, ids) {
+      const p = makePlaylist(title.trim(), fromLibrary(ids));
+      p.playlist.updated_at_ms = Date.now();
+      playlists = [...playlists, p];
+      return p.playlist;
+    },
+    async updatePlaylist(pid, title, description) {
+      const p = findPlaylist(pid);
+      p.playlist = { ...p.playlist, title, description };
+      touch(p);
+    },
+    async deletePlaylist(pid) {
+      playlists = playlists.filter((p) => p.playlist.id !== pid);
+    },
+    async addToPlaylist(pid, ids, at) {
+      const p = findPlaylist(pid);
+      const items = fromLibrary(ids);
+      p.items.splice(at ?? p.items.length, 0, ...items);
+      touch(p);
+      return items.length;
+    },
+    async removeFromPlaylist(pid, items: ItemId[]) {
+      const p = findPlaylist(pid);
+      p.items = p.items.filter((i) => !items.includes(i.id));
+      touch(p);
+    },
+    async moveInPlaylist(pid, item, to) {
+      const p = findPlaylist(pid);
+      const from = p.items.findIndex((i) => i.id === item);
+      const [moved] = p.items.splice(from, 1);
+      p.items.splice(Math.min(to, p.items.length), 0, moved);
+      touch(p);
+    },
+    async pickPlaylistFile() {
+      return "/home/ivan/Плейлисты/Дорога.m3u8";
+    },
+    async importPlaylist(path) {
+      const title = path.split("/").pop()?.replace(/\.[^.]+$/, "") ?? "Импорт";
+      const p = makePlaylist(title, [...fromLibrary([3, 10, 6]), entry(foreign("Нет в библиотеке", "Кто-то", "", 180_000), "/home/ivan/Музыка/нет.flac")], "import:m3u");
+      p.playlist.updated_at_ms = Date.now();
+      playlists = [...playlists, p];
+      return { playlist: p.playlist, total: 4, matched: 3 };
+    },
+    async pickExportPath(name, format) {
+      return `/home/ivan/Плейлисты/${name}.${EXPORT_FORMATS.find((f) => f.format === format)?.ext ?? format}`;
+    },
+    async exportPlaylist(pid, format, path) {
+      const p = findPlaylist(pid);
+      const label = (t: TrackSnapshot) => (t.artists.length ? `${t.artists.join(", ")} - ${t.title}` : t.title);
+      let text: string;
+      let skipped = 0;
+      if (format === "m3u") {
+        const lines = ["#EXTM3U", `#PLAYLIST:${p.playlist.title}`];
+        for (const i of p.items) {
+          const location = i.location ?? tracks.find((t) => t.id === resolve(i))?.uri;
+          if (!location) {
+            skipped++;
+            continue;
+          }
+          lines.push(`#EXTINF:${Math.ceil((i.track.duration_ms ?? -1000) / 1000)},${label(i.track)}`, location);
+        }
+        text = `${lines.join("\n")}\n`;
+      } else if (format === "txt") {
+        text = p.items.map((i) => label(i.track)).join("\n") + "\n";
+      } else {
+        text = JSON.stringify({ playlist: { title: p.playlist.title, track: p.items.map((i) => i.track) } }, null, 2);
+      }
+      window.__lastExport = { format, path, text };
+      return { text, skipped };
+    },
   };
 }

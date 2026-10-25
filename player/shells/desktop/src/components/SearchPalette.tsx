@@ -1,9 +1,10 @@
 import { useMemo, useState } from "react";
 import { useApp } from "@/app-context";
 import { Cover } from "@/components/common";
+import { Mosaic } from "@/components/playlist-ui";
 import { CommandDialog, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from "@/components/ui/command";
 import { artists } from "@/format";
-import { search } from "@/lib/library";
+import { normalize, search } from "@/lib/library";
 
 /** Палитра поиска (⌘K / Ctrl+K): треки, альбомы, артисты. */
 export function SearchPalette({ open, onOpenChange }: { open: boolean; onOpenChange: (open: boolean) => void }) {
@@ -11,6 +12,10 @@ export function SearchPalette({ open, onOpenChange }: { open: boolean; onOpenCha
   const [query, setQuery] = useState("");
   // Фильтруем сами: cmdk на десятках тысяч строк медленный, а выдача всё равно ограничена.
   const found = useMemo(() => search(app.tracks, app.lib, query), [app.tracks, app.lib, query]);
+  const lists = useMemo(() => {
+    const q = normalize(query);
+    return q ? app.playlists.playlists.filter((p) => normalize(p.playlist.title).includes(q)).slice(0, 5) : [];
+  }, [app.playlists.playlists, query]);
   const close = () => {
     onOpenChange(false);
     setQuery("");
@@ -27,7 +32,7 @@ export function SearchPalette({ open, onOpenChange }: { open: boolean; onOpenCha
     >
       <CommandInput value={query} onValueChange={setQuery} placeholder="Что послушаем?" />
       <CommandList className="max-h-[min(60vh,480px)]">
-        {query.trim() && <CommandEmpty>Ничего не нашлось.</CommandEmpty>}
+        {query.trim() && !lists.length && <CommandEmpty>Ничего не нашлось.</CommandEmpty>}
         {found.tracks.length > 0 && (
           <CommandGroup heading="Треки">
             {found.tracks.map((t) => (
@@ -69,6 +74,26 @@ export function SearchPalette({ open, onOpenChange }: { open: boolean; onOpenCha
                 <span className="min-w-0">
                   <span className="block truncate font-medium">{a.title}</span>
                   <span className="block truncate text-xs text-muted-foreground">Альбом · {a.artist}</span>
+                </span>
+              </CommandItem>
+            ))}
+          </CommandGroup>
+        )}
+        {lists.length > 0 && (
+          <CommandGroup heading="Плейлисты">
+            {lists.map((p) => (
+              <CommandItem
+                key={`p${p.playlist.id}`}
+                value={`p${p.playlist.id}`}
+                onSelect={() => {
+                  app.go({ kind: "playlist", key: p.playlist.id });
+                  close();
+                }}
+              >
+                <Mosaic covers={p.covers} className="size-9 rounded" />
+                <span className="min-w-0">
+                  <span className="block truncate font-medium">{p.playlist.title}</span>
+                  <span className="block truncate text-xs text-muted-foreground">Плейлист</span>
                 </span>
               </CommandItem>
             ))}

@@ -21,6 +21,7 @@ export interface Track {
   track_no: number | null;
   disc_no: number | null;
   recording_mbid: string | null;
+  isrc: string | null;
   replay_gain: ReplayGain;
 }
 
@@ -71,10 +72,22 @@ export type CoreEvent =
   | { type: "error"; data: string };
 
 export type CoreError =
-  | { type: "not_implemented" | "missing_port" | "not_configured" | "history"; data: string }
+  | { type: "not_implemented" | "missing_port" | "not_configured" | "history" | "playlist"; data: string }
   | { type: "invalid_queue" };
 
 export type Outcome = "playing" | "finished" | "skipped" | "stopped" | "error" | "interrupted";
+
+/** Метаданные трека без привязки к файлу (`player_domain::TrackSnapshot`). */
+export interface TrackSnapshot {
+  title: string;
+  artists: string[];
+  album: string | null;
+  album_artist: string | null;
+  duration_ms: number | null;
+  recording_mbid: string | null;
+  /** `isrc`, `spotify`… — ключи как у `ext_ids` сервера. */
+  ext_ids: Record<string, string>;
+}
 
 export interface PlayRecord {
   id: string;
@@ -110,6 +123,7 @@ export interface Scanning {
 export type LibraryEvent =
   | { type: "scanning"; data: Scanning }
   | { type: "changed" }
+  | { type: "playlists" }
   | { type: "error"; data: string };
 
 /** Всё, что окну нужно при открытии (`bridge::Snapshot`). */
@@ -121,11 +135,65 @@ export interface Snapshot {
   scanning: Scanning | null;
   scrobbling: ScrobbleStatus | null;
   scrobbling_available: boolean;
+  /** Плейлист, с которым запустили приложение («Открыть с помощью»). */
+  opened_playlist: PlaylistId | null;
 }
 
 export interface Added {
   tracks: Track[];
   failed: string[];
+}
+
+export type PlaylistId = string;
+export type ItemId = string;
+
+export interface Playlist {
+  id: PlaylistId;
+  title: string;
+  description: string | null;
+  /** `null` — создан здесь; `import:m3u` и т. п. — импорт. */
+  origin: string | null;
+  created_at_ms: number;
+  updated_at_ms: number;
+}
+
+/** Плейлист в списке (`player_core::PlaylistCard`). */
+export interface PlaylistCard {
+  playlist: Playlist;
+  items: number;
+  duration_ms: number;
+  /** Треки библиотеки для мозаики обложки. */
+  covers: TrackId[];
+}
+
+/** Элемент плейлиста (`player_core::ResolvedItem`). */
+export interface PlaylistEntry {
+  id: ItemId;
+  position: string;
+  added_at_ms: number;
+  location: string | null;
+  track: TrackSnapshot;
+  /** Трек библиотеки; `null` — на этом устройстве такого нет. */
+  track_id: TrackId | null;
+}
+
+export interface PlaylistView {
+  playlist: Playlist;
+  items: PlaylistEntry[];
+}
+
+export interface ImportReport {
+  playlist: Playlist;
+  total: number;
+  matched: number;
+}
+
+export type PlaylistFormat = "m3u" | "xspf" | "jspf" | "csv" | "txt";
+
+export interface Exported {
+  text: string;
+  /** Сколько не попало (в M3U8 — треки без файла на этом устройстве). */
+  skipped: number;
 }
 
 /** Ядро для окна: в приложении — команды Tauri, в браузере — подмена (`mock.ts`). */
@@ -152,7 +220,32 @@ export interface Backend {
   coverColor(id: TrackId): Promise<string | null>;
   /** Показать файл в файловом менеджере. */
   revealInFolder(path: string): Promise<void>;
+  playlists(): Promise<PlaylistCard[]>;
+  playlist(id: PlaylistId): Promise<PlaylistView>;
+  /** Новый плейлист, сразу с треками. */
+  createPlaylist(title: string, tracks: TrackId[]): Promise<Playlist>;
+  updatePlaylist(id: PlaylistId, title: string, description: string | null): Promise<void>;
+  deletePlaylist(id: PlaylistId): Promise<void>;
+  /** Ответ — сколько добавлено. `at` — место, `null` — в конец. */
+  addToPlaylist(id: PlaylistId, tracks: TrackId[], at: number | null): Promise<number>;
+  removeFromPlaylist(id: PlaylistId, items: ItemId[]): Promise<void>;
+  moveInPlaylist(id: PlaylistId, item: ItemId, to: number): Promise<void>;
+  /** Диалог выбора файла плейлиста; `null` — отказались. */
+  pickPlaylistFile(): Promise<string | null>;
+  importPlaylist(path: string): Promise<ImportReport>;
+  /** Диалог сохранения; `null` — отказались. */
+  pickExportPath(defaultName: string, format: PlaylistFormat): Promise<string | null>;
+  exportPlaylist(id: PlaylistId, format: PlaylistFormat, path: string): Promise<Exported>;
 }
+
+/** Форматы экспорта: расширение и подсказка, куда его нести. */
+export const EXPORT_FORMATS: Array<{ format: PlaylistFormat; ext: string; label: string; hint: string }> = [
+  { format: "m3u", ext: "m3u8", label: "M3U8", hint: "Любой плеер: foobar2000, AIMP, VLC, Poweramp, Navidrome" },
+  { format: "xspf", ext: "xspf", label: "XSPF", hint: "VLC, Strawberry, Rhythmbox — с названиями и альбомами" },
+  { format: "jspf", ext: "jspf", label: "JSPF", hint: "ListenBrainz и Scrobb: MusicBrainz ID, ISRC, все артисты" },
+  { format: "csv", ext: "csv", label: "CSV", hint: "TuneMyMusic, Soundiiz → Spotify, Яндекс, Apple Music; таблицы" },
+  { format: "txt", ext: "txt", label: "Текст", hint: "«Артист - Название»: импорт Яндекс Музыки, переносчики" },
+];
 
 /** `s` — 128 px для строк и плиток, `l` — 640 px для «Сейчас играет» и шапок. */
 export type CoverSize = "s" | "l";
@@ -171,6 +264,8 @@ export function describeError(error: unknown): string {
         return `Не настроено: ${e.data}`;
       case "history":
         return `История: ${e.data}`;
+      case "playlist":
+        return e.data;
       case "not_implemented":
         return `Ещё не сделано: ${e.data}`;
     }

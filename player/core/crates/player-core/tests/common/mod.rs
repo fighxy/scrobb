@@ -71,6 +71,7 @@ pub fn track(id: u64, file: &str) -> Track {
         track_no: None,
         disc_no: None,
         recording_mbid: None,
+        isrc: None,
         replay_gain: ReplayGain::default(),
     }
 }

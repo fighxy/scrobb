@@ -15,6 +15,7 @@ function t(title: string, artists: string[], album: string | null, extra: Partia
     track_no: null,
     disc_no: null,
     recording_mbid: null,
+    isrc: null,
     replay_gain: { track_gain_db: null, track_peak: null, album_gain_db: null, album_peak: null },
     ...extra,
   };

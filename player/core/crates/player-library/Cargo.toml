@@ -9,6 +9,7 @@ publish.workspace = true
 [dependencies]
 player-domain.workspace = true
 player-ports.workspace = true
+scrobb-sync.workspace = true
 lofty.workspace = true
 
 [dev-dependencies]
