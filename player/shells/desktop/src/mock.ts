@@ -6,7 +6,9 @@
 // сразу играет трек; `?demo=linking` — открыто окно привязки;
 // `?demo=scanning` — идёт сканирование папки; `?demo=big` — 10 000 треков
 // (проверка плавности прокрутки); `?demo=playlist` — запуск с плейлистом,
-// в котором есть треки не из библиотеки.
+// в котором есть треки не из библиотеки; `?demo=sync` — при обмене приходит
+// плейлист «с телефона»; `?demo=sync-offline` — нет связи;
+// `?demo=sync-unsupported` — сервер не умеет синхронизацию.
 //
 // Обложки — SVG-градиенты с оттенком от названия альбома; у одного альбома
 // обложки нет, чтобы была видна заглушка.
@@ -23,6 +25,7 @@ import type {
   PlaylistFormat,
   PlayerState,
   PlayRecord,
+  PlaylistSyncStatus,
   Scanning,
   ScrobbleStatus,
   Snapshot,
@@ -298,6 +301,31 @@ export function createMockBackend(search = location.search): Backend {
     emit({ type: "scrobbling", data: s });
   };
 
+  let playlistSync: PlaylistSyncStatus = {
+    state: demo === "sync-offline" ? "retrying" : demo === "sync-unsupported" ? "unsupported" : "synced",
+    last_synced_ms: demo === "sync-unsupported" ? null : now - 3 * 60_000,
+  };
+  let fromPhone = demo === "sync";
+  const setPlaylistSync = (s: PlaylistSyncStatus) => {
+    playlistSync = s;
+    emit({ type: "playlist_sync", data: s });
+  };
+  const syncPlaylists = () => {
+    if (scrobbling.state === "not_linked") return setPlaylistSync({ ...playlistSync, state: "not_linked" });
+    setPlaylistSync({ ...playlistSync, state: "syncing" });
+    setTimeout(() => {
+      if (demo === "sync-offline") return setPlaylistSync({ ...playlistSync, state: "retrying" });
+      if (demo === "sync-unsupported") return setPlaylistSync({ ...playlistSync, state: "unsupported" });
+      if (fromPhone) {
+        fromPhone = false;
+        // Правили только что — на другом устройстве.
+        playlists = [makePlaylist("С телефона", fromLibrary([3, 0, 9]), null, now - Date.now()), ...playlists];
+        emit({ type: "playlists_changed" });
+      }
+      setPlaylistSync({ state: "synced", last_synced_ms: Date.now() });
+    }, 700);
+  };
+
   if (demo === "playing" || demo === "linking") {
     index = 2;
     state = { ...state, status: "playing", current: tracks[2] ?? null, position_ms: 72_000, queue_position: [2, queue.length] };
@@ -335,11 +363,19 @@ export function createMockBackend(search = location.search): Backend {
         case "link_scrobb_account":
           setScrobbling({ pending: scrobbling.pending, state: "linking" });
           emit({ type: "scrobb_link_code", data: { user_code: "WDJB-MJHT", verification_uri_complete: "https://scrobb.ru/link?code=WDJB-MJHT" } });
-          setTimeout(() => scrobbling.state === "linking" && setScrobbling({ pending: 0, state: "ready" }), 4000);
+          setTimeout(() => {
+            if (scrobbling.state !== "linking") return;
+            setScrobbling({ pending: 0, state: "ready" });
+            syncPlaylists();
+          }, 4000);
           return;
         case "cancel_scrobb_link":
-        case "unlink_scrobb_account":
           return setScrobbling({ pending: scrobbling.pending, state: "not_linked" });
+        case "unlink_scrobb_account":
+          setScrobbling({ pending: scrobbling.pending, state: "not_linked" });
+          return setPlaylistSync({ ...playlistSync, state: "not_linked" });
+        case "sync_playlists":
+          return syncPlaylists();
       }
     },
     async snapshot(): Promise<Snapshot> {
@@ -350,6 +386,8 @@ export function createMockBackend(search = location.search): Backend {
         scanning,
         scrobbling,
         scrobbling_available: true,
+        playlist_sync: playlistSync,
+        playlist_sync_available: true,
         opened_playlist: demo === "playlist" ? (playlists.find((p) => p.playlist.title === "Импорт из Spotify")?.playlist.id ?? null) : null,
       };
     },

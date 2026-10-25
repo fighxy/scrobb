@@ -11,6 +11,7 @@ use scrobb_api::{
     DeviceTokenErrorCode, DeviceTokenRequest, ListenSubmission, MAX_LISTENS_PER_BATCH, NowPlaying,
     ScrobbleConfig, SubmitListensRequest, SubmitListensResponse, paths,
 };
+use scrobb_sync::playlists::{SyncRequest, SyncResponse};
 use serde::{Serialize, de::DeserializeOwned};
 
 pub mod retry;
@@ -232,6 +233,21 @@ impl ScrobbClient {
         self.request(Method::Delete, paths::DEVICE_CURRENT, None)
     }
 
+    /// `POST /api/v1/sync/playlists` — отправить изменённое на устройстве и
+    /// получить изменённое на сервере после `cursor`.
+    pub fn sync_playlists<T: Serialize>(&self, body: &SyncRequest<T>) -> HttpRequest {
+        self.request(Method::Post, paths::SYNC_PLAYLISTS, Some(json(body)))
+    }
+
+    /// Разбор ответа на [`sync_playlists`](Self::sync_playlists). `404` —
+    /// [`ApiError::Unexpected`]: сервер ещё не умеет синхронизацию.
+    pub fn parse_sync_playlists<T: DeserializeOwned>(
+        &self,
+        resp: &HttpResponse,
+    ) -> Result<SyncResponse<T>, ApiError> {
+        parse(resp)
+    }
+
     fn request(&self, method: Method, path: &str, body: Option<Vec<u8>>) -> HttpRequest {
         let mut headers = vec![("User-Agent".to_owned(), self.info.user_agent())];
         if let Some(token) = &self.token {
@@ -389,6 +405,33 @@ mod tests {
                 Method::Delete,
                 "https://scrobb.ru/api/v1/scrobble/now-playing"
             )
+        );
+    }
+
+    #[test]
+    fn sync_round_trip_and_missing_endpoint() {
+        let body = SyncRequest::<String> {
+            cursor: Some("41".into()),
+            limit: 500,
+            playlists: Vec::new(),
+            items: Vec::new(),
+        };
+        let req = client().sync_playlists(&body);
+        assert_eq!(
+            (req.method, req.url.as_str()),
+            (Method::Post, "https://scrobb.ru/api/v1/sync/playlists")
+        );
+        let sent: serde_json::Value = serde_json::from_slice(req.body.as_ref().unwrap()).unwrap();
+        assert_eq!(sent["cursor"], "41");
+        let answer = response(
+            200,
+            r#"{"cursor":"42","more":false,"playlists":[],"items":[]}"#,
+        );
+        let got: SyncResponse<String> = client().parse_sync_playlists(&answer).unwrap();
+        assert_eq!((got.cursor.as_str(), got.more), ("42", false));
+        assert_eq!(
+            client().parse_sync_playlists::<String>(&response(404, "")),
+            Err(ApiError::Unexpected(404))
         );
     }
 

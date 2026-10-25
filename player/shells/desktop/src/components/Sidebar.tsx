@@ -17,7 +17,7 @@ import {
 import { type ComponentType, useState } from "react";
 import { useApp } from "@/app-context";
 import { IconButton } from "@/components/common";
-import { Mosaic } from "@/components/playlist-ui";
+import { Mosaic, SyncButton } from "@/components/playlist-ui";
 import { DRAG_TRACKS } from "@/components/TrackTable";
 import {
   DropdownMenu,
@@ -177,6 +177,7 @@ function PlaylistActions({ compact }: { compact?: boolean }) {
   const [creating, setCreating] = useState(false);
   return (
     <>
+      <SyncButton className={cn(compact && "size-10")} />
       <IconButton
         label="Импорт плейлиста: M3U, PLS, XSPF, JSPF, CSV, текст"
         className={cn(compact && "size-10")}

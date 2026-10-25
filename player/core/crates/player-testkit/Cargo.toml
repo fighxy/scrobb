@@ -1,6 +1,6 @@
 [package]
 name = "player-testkit"
-description = "Общая обвязка тестов ядра: ручной вывод звука, тестовые файлы, часы, проверки истории и плейлистов"
+description = "Общая обвязка тестов ядра: ручной вывод звука, тестовые файлы, часы, проверки истории и плейлистов, сервер Scrobb в памяти"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,6 +11,11 @@ player-domain.workspace = true
 player-ports.workspace = true
 player-history.workspace = true
 player-playlists.workspace = true
+scrobb-api.workspace = true
+scrobb-client.workspace = true
+scrobb-sync.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 
 [lints]
 workspace = true

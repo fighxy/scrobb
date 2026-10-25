@@ -2,7 +2,10 @@
 //! окном Tauri и вебом. TS-типы оболочки (`player/shells/desktop/src/core.ts`)
 //! повторяют его; этот тест не даёт формату поменяться незаметно.
 
-use player_core::{Command, CoreError, Event, ScrobbleState, ScrobbleStatus};
+use player_core::{
+    Capabilities, Command, CoreError, Event, PlaylistSyncState, PlaylistSyncStatus, ScrobbleState,
+    ScrobbleStatus,
+};
 use player_domain::{
     MediaUri, PlaybackStatus, PlayerState, RepeatMode, ReplayGain, Track, TrackId,
 };
@@ -46,6 +49,7 @@ fn commands_are_tagged_objects() {
             Command::UnlinkScrobbAccount,
             json!({"type": "unlink_scrobb_account"}),
         ),
+        (Command::SyncPlaylists, json!({"type": "sync_playlists"})),
     ];
     for (command, expected) in cases {
         assert_eq!(to_json(&command), expected);
@@ -113,6 +117,29 @@ fn events_and_state_keep_their_shape() {
             "user_code": "WDJB-MJHT",
             "verification_uri_complete": "https://scrobb.ru/link?code=WDJB-MJHT"
         }})
+    );
+    assert_eq!(
+        to_json(&Event::PlaylistSync(PlaylistSyncStatus {
+            state: PlaylistSyncState::Unsupported,
+            last_synced_ms: Some(1_761_381_065_000),
+        })),
+        json!({"type": "playlist_sync", "data": {
+            "state": "unsupported", "last_synced_ms": 1_761_381_065_000_i64
+        }})
+    );
+    assert_eq!(
+        to_json(&Event::PlaylistsChanged),
+        json!({"type": "playlists_changed"})
+    );
+    assert_eq!(
+        to_json(&Capabilities {
+            bit_perfect: false,
+            install_plugins: true,
+            scrobbling: true,
+            playlist_sync: true,
+        }),
+        json!({"bit_perfect": false, "install_plugins": true,
+               "scrobbling": true, "playlist_sync": true})
     );
     assert_eq!(
         to_json(&Event::Error("нет файла".into())),

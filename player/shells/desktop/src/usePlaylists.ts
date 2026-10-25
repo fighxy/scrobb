@@ -20,13 +20,18 @@ export function usePlaylists(backend: Backend, toast: (text: string) => void, tr
   // Библиотека изменилась — треки плейлистов могли найтись или пропасть.
   useEffect(refresh, [refresh, tracks]);
 
-  // Импорт из командной строки («Открыть с помощью» для .m3u8).
+  // Импорт из командной строки («Открыть с помощью» для .m3u8) и правки,
+  // пришедшие с других устройств.
   useEffect(() => {
-    const stop = backend.onLibraryEvent((event) => {
+    const stopLibrary = backend.onLibraryEvent((event) => {
       if (event.type === "playlists") refresh();
     });
+    const stopCore = backend.onEvent((event) => {
+      if (event.type === "playlists_changed") refresh();
+    });
     return () => {
-      stop.then((f) => f());
+      stopLibrary.then((f) => f());
+      stopCore.then((f) => f());
     };
   }, [backend, refresh]);
 

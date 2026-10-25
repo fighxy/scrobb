@@ -9,7 +9,9 @@
 //! - [`ManualClock`] — часы, которые двигает тест;
 //! - [`history`] — общие проверки любого `HistoryStore`;
 //! - [`disk`] — настоящие папки: порт над диском и временная папка;
-//! - [`playlists`] — общие проверки любого `PlaylistStore`.
+//! - [`playlists`] — общие проверки любого `PlaylistStore`;
+//! - [`server`] — сервер Scrobb в памяти: привязка, скробблы и эталонная
+//!   синхронизация плейлистов.
 
 use std::io::Cursor;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
@@ -24,6 +26,7 @@ use player_ports::{
 pub mod disk;
 pub mod history;
 pub mod playlists;
+pub mod server;
 
 /// Папка с тестовыми файлами.
 pub const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures");

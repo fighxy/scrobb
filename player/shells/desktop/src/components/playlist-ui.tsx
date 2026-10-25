@@ -1,9 +1,11 @@
-// Общие части плейлистов: мозаика обложек и подменю «Добавить в плейлист»
-// (одно и то же в меню по правой кнопке и в выпадающем меню).
+// Общие части плейлистов: мозаика обложек, подменю «Добавить в плейлист»
+// (одно и то же в меню по правой кнопке и в выпадающем меню) и значок
+// синхронизации с другими устройствами.
 
-import { ListMusic, ListPlus, Plus } from "lucide-react";
+import { Cloud, CloudAlert, CloudCheck, CloudOff, ListMusic, ListPlus, Plus, RefreshCw } from "lucide-react";
+import { useEffect, useState } from "react";
 import { useApp } from "@/app-context";
-import { Cover } from "@/components/common";
+import { Cover, IconButton } from "@/components/common";
 import {
   ContextMenuItem,
   ContextMenuSeparator,
@@ -18,7 +20,8 @@ import {
   DropdownMenuSubContent,
   DropdownMenuSubTrigger,
 } from "@/components/ui/dropdown-menu";
-import type { TrackId } from "@/core";
+import type { PlaylistSyncState, TrackId } from "@/core";
+import { syncLabel } from "@/format";
 import { cn } from "@/lib/utils";
 
 /** Обложка плейлиста: одна картинка, мозаика 2×2 из разных альбомов или заглушка. */
@@ -70,5 +73,46 @@ export function AddToPlaylist({ tracks, kind }: { tracks: TrackId[]; kind: "cont
         ))}
       </Content>
     </Sub>
+  );
+}
+
+const SYNC_ICON: Record<PlaylistSyncState, typeof Cloud> = {
+  not_linked: Cloud,
+  syncing: RefreshCw,
+  synced: CloudCheck,
+  retrying: CloudOff,
+  unauthorized: CloudAlert,
+  upgrade_required: CloudAlert,
+  unsupported: CloudOff,
+};
+
+/** Значок синхронизации плейлистов: состояние в подсказке, щелчок — синхронизировать
+ *  сейчас (или привязать устройство, если оно не привязано). */
+export function SyncButton({ className }: { className?: string }) {
+  const { sync } = useApp();
+  // «2 мин назад» должно стареть, пока окно открыто.
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 30_000);
+    return () => clearInterval(timer);
+  }, []);
+  if (!sync.available) return null;
+  const state = sync.status?.state ?? "not_linked";
+  const Icon = SYNC_ICON[state];
+  const needsUser = state === "unauthorized" || state === "not_linked";
+  return (
+    <IconButton
+      label={syncLabel(sync.status, now)}
+      data-sync={state}
+      className={cn(
+        className,
+        state === "synced" && "text-success hover:text-success",
+        (state === "retrying" || state === "unauthorized" || state === "upgrade_required") && "text-warning hover:text-warning",
+      )}
+      disabled={state === "upgrade_required"}
+      onClick={() => (needsUser ? sync.link() : sync.now())}
+    >
+      <Icon className={cn(state === "syncing" && "animate-spin motion-reduce:animate-none")} />
+    </IconButton>
   );
 }

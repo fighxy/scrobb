@@ -1,4 +1,4 @@
-import type { Outcome, PlayerState } from "./core";
+import type { Outcome, PlayerState, PlaylistSyncStatus } from "./core";
 
 /** `3:07`, `1:02:05`; неизвестно — `—`. */
 export function duration(ms: number | null | undefined): string {
@@ -27,6 +27,36 @@ export function playedAt(ms: number, now = Date.now()): string {
   return new Date(now).toDateString() === date.toDateString()
     ? time
     : `${date.toLocaleDateString("ru-RU", { day: "numeric", month: "short" })}, ${time}`;
+}
+
+/** Когда это было: «только что», «5 мин назад», «в 14:05», «3 окт., 14:05». */
+export function ago(ms: number, now = Date.now()): string {
+  const passed = now - ms;
+  if (passed < 60_000) return "только что";
+  if (passed < 3_600_000) return `${Math.floor(passed / 60_000)}\u00a0мин назад`;
+  const at = playedAt(ms, now);
+  return at.includes(",") ? at : `в ${at}`;
+}
+
+/** Подпись состояния синхронизации плейлистов для подсказки значка. */
+export function syncLabel(status: PlaylistSyncStatus | null, now = Date.now()): string {
+  const last = status?.last_synced_ms ?? null;
+  switch (status?.state ?? "not_linked") {
+    case "not_linked":
+      return "Подключите Scrobb — плейлисты будут на всех ваших устройствах";
+    case "syncing":
+      return "Синхронизация плейлистов…";
+    case "synced":
+      return last ? `Плейлисты синхронизированы ${ago(last, now)}` : "Плейлисты синхронизированы";
+    case "retrying":
+      return `Нет связи со Scrobb — правки уйдут позже${last ? ` (последний раз ${ago(last, now)})` : ""}`;
+    case "unauthorized":
+      return "Войдите в Scrobb заново — синхронизация плейлистов стоит";
+    case "upgrade_required":
+      return "Обновите плеер — синхронизация плейлистов стоит";
+    case "unsupported":
+      return "Сервер Scrobb пока не умеет синхронизировать плейлисты — они хранятся на этом устройстве";
+  }
 }
 
 export const OUTCOME: Record<Outcome, string> = {

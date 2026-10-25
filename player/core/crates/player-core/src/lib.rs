@@ -8,7 +8,8 @@
 //! (`player-history`) запоминает прослушивания и отправляет засчитанные.
 //!
 //! События движка обрабатывает отдельный поток, историю и связь со Scrobb
-//! (привязка устройства, «сейчас играет», отправка) — ещё один.
+//! (привязка устройства, «сейчас играет», отправка, синхронизация
+//! плейлистов) — ещё один.
 //! Наблюдатель и медиасессия вызываются без удержания блокировок, поэтому
 //! из колбэка можно сразу отправить новую команду.
 
@@ -30,12 +31,15 @@ use serde::{Deserialize, Serialize};
 mod history;
 mod playlists;
 mod scrobb;
+mod sync;
 
 use history::{HistoryService, Message, Stamp};
 use scrobb::{Remote, ScrobbPorts};
+use sync::{EditClock, PlaylistSync};
 
 pub use playlists::{ImportReport, PlaylistCard, PlaylistView, ResolvedItem};
 pub use scrobb::SCROBB_TOKEN_KEY;
+pub use sync::{PlaylistSyncState, PlaylistSyncStatus};
 
 /// «Назад» в первые 3 секунды трека — предыдущий трек, позже — начало текущего.
 pub const RESTART_THRESHOLD_MS: u64 = 3_000;
@@ -137,6 +141,9 @@ pub enum Command {
     CancelScrobbLink,
     /// Отвязать устройство: отозвать токен и удалить его; очередь сохраняется.
     UnlinkScrobbAccount,
+    /// Синхронизировать плейлисты сейчас (кнопка, окно снова на экране).
+    /// Сами они синхронизируются после правок и раз в минуту.
+    SyncPlaylists,
 }
 
 /// Событие для оболочки. В JSON — `{"type": "state", "data": {…}}`.
@@ -155,6 +162,10 @@ pub enum Event {
     },
     /// Отправка в Scrobb: «в очереди N», «войдите заново» (§18.2).
     Scrobbling(ScrobbleStatus),
+    /// Синхронизация плейлистов: «синхронизировано», «нет связи».
+    PlaylistSync(PlaylistSyncStatus),
+    /// Плейлисты изменились на другом устройстве: перечитать список и открытый.
+    PlaylistsChanged,
     /// Ошибка, которую стоит показать пользователю.
     Error(String),
 }
@@ -201,6 +212,8 @@ pub struct Capabilities {
     pub install_plugins: bool,
     /// Отправка прослушиваний в Scrobb.
     pub scrobbling: bool,
+    /// Синхронизация плейлистов через аккаунт Scrobb.
+    pub playlist_sync: bool,
 }
 
 /// Ошибка команды. В JSON — `{"type": "missing_port", "data": "http"}`.
@@ -237,6 +250,14 @@ impl Core {
         config: CoreConfig,
         observer: Arc<dyn Observer>,
     ) -> Self {
+        // Часы правок плейлистов: продолжают с последней сохранённой метки.
+        let edits = stores.playlists.as_ref().map(|store| {
+            let (edits, problem) = EditClock::start(&**store, ports.clock.clone());
+            if let Some(problem) = problem {
+                observer.on_event(Event::Error(format!("Плейлисты: {problem}")));
+            }
+            Arc::new(edits)
+        });
         // Связь со Scrobb нужна вся сразу: сеть, секреты, история и адрес сервера.
         let (scrobb, remote) = match (&ports.http, &ports.secrets, &stores.history, &config.scrobb)
         {
@@ -257,11 +278,19 @@ impl Core {
                     http: http.clone(),
                     secrets: secrets.clone(),
                 };
+                let sync = stores
+                    .playlists
+                    .clone()
+                    .zip(edits.clone())
+                    .map(|(store, edits)| {
+                        PlaylistSync::new(store, edits, ports.clock.clone(), observer.clone())
+                    });
                 let remote = Remote::new(
                     scrobb_ports,
                     store.clone(),
                     ports.clock.clone(),
                     observer.clone(),
+                    sync,
                 );
                 (Ok(()), Some(remote))
             }
@@ -287,6 +316,7 @@ impl Core {
             library: stores.library,
             history: stores.history,
             playlists: stores.playlists,
+            edits,
             playlist_ids: Mutex::new(uuid::ContextV7::new()),
             messages,
             clock: ports.clock,
@@ -351,6 +381,7 @@ impl Core {
             bit_perfect: false,
             install_plugins: !cfg!(target_os = "ios"),
             scrobbling: self.inner().scrobb.is_ok(),
+            playlist_sync: self.inner().scrobb.is_ok() && self.inner().playlists.is_some(),
         }
     }
 
@@ -478,6 +509,14 @@ impl Core {
                 inner.scrobb.clone()?;
                 inner.report(|_| Message::Unlink);
             }
+            Command::SyncPlaylists => {
+                inner.scrobb.clone()?;
+                inner
+                    .playlists
+                    .as_ref()
+                    .ok_or(CoreError::MissingPort("playlists"))?;
+                inner.report(|_| Message::SyncPlaylists);
+            }
         }
         Ok(())
     }
@@ -525,6 +564,8 @@ struct Inner {
     library: Arc<dyn TrackStore>,
     history: Option<Arc<dyn HistoryStore>>,
     playlists: Option<Arc<dyn PlaylistStore>>,
+    /// Часы правок плейлистов; есть, когда есть хранилище плейлистов.
+    edits: Option<Arc<EditClock>>,
     /// UUIDv7 плейлистов и их элементов: монотонные в пределах миллисекунды.
     playlist_ids: Mutex<uuid::ContextV7>,
     /// Сообщения потоку истории; `None` — история не ведётся.

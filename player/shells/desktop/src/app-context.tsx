@@ -2,7 +2,7 @@
 // Через контекст, чтобы не протаскивать десяток свойств через каждый экран.
 
 import { createContext, useContext } from "react";
-import type { Backend, CoverSize, PlayerState, Track, TrackId } from "./core";
+import type { Backend, CoverSize, PlayerState, PlaylistSyncStatus, Track, TrackId } from "./core";
 import type { Library } from "./lib/library";
 import type { View } from "./lib/nav";
 import type { Playlists } from "./usePlaylists";
@@ -25,6 +25,16 @@ export interface AppApi {
   reveal(path: string): void;
   /** Плейлисты и действия с ними. */
   playlists: Playlists;
+  /** Синхронизация плейлистов через аккаунт Scrobb. */
+  sync: {
+    status: PlaylistSyncStatus | null;
+    /** Есть ли она на этой сборке (сервер Scrobb задан, есть база плейлистов). */
+    available: boolean;
+    /** Синхронизировать сейчас. */
+    now(): void;
+    /** Привязать устройство к Scrobb. */
+    link(): void;
+  };
 }
 
 export const AppContext = createContext<AppApi | null>(null);

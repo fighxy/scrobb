@@ -10,7 +10,7 @@ use std::thread;
 
 use player_core::{
     Command, Core, CoreConfig, CoreError, Event, ImportReport, Observer, PlaylistCard,
-    PlaylistView, Ports, ScrobbSettings, ScrobbleStatus, Stores,
+    PlaylistSyncStatus, PlaylistView, Ports, ScrobbSettings, ScrobbleStatus, Stores,
 };
 use player_domain::{PlayerState, Track, TrackId};
 use player_history::PlayRecord;
@@ -48,6 +48,7 @@ pub struct Player {
     forwarder: Arc<Forwarder>,
     covers: Arc<Covers>,
     scrobbling_available: bool,
+    playlist_sync_available: bool,
     /// Плейлист из аргументов запуска: окно откроет его сразу.
     opened: Mutex<Option<PlaylistId>>,
 }
@@ -74,6 +75,7 @@ impl Player {
         let forwarder = Arc::new(Forwarder {
             app: app.clone(),
             scrobbling: Mutex::new(None),
+            playlist_sync: Mutex::new(None),
         });
         let ports = Ports {
             clock: Arc::new(SystemClock::new()),
@@ -98,14 +100,15 @@ impl Player {
             playlists: Some(playlists),
         };
         let core = Core::new(ports, stores, config, forwarder.clone());
-        let scrobbling_available = core.capabilities().scrobbling;
+        let capabilities = core.capabilities();
         Ok(Self {
             core: Mutex::new(Some(core)),
             library,
             scanner,
             forwarder,
             covers,
-            scrobbling_available,
+            scrobbling_available: capabilities.scrobbling,
+            playlist_sync_available: capabilities.playlist_sync,
             opened: Mutex::new(None),
         })
     }
@@ -192,6 +195,8 @@ pub struct Forwarder {
     app: AppHandle,
     /// Последнее состояние отправки: окно может открыться позже первого события.
     scrobbling: Mutex<Option<ScrobbleStatus>>,
+    /// Последнее состояние синхронизации плейлистов — по той же причине.
+    playlist_sync: Mutex<Option<PlaylistSyncStatus>>,
 }
 
 impl Forwarder {
@@ -218,6 +223,7 @@ impl Observer for Forwarder {
                 }
             }
             Event::Scrobbling(status) => *lock(&self.scrobbling) = Some(*status),
+            Event::PlaylistSync(status) => *lock(&self.playlist_sync) = Some(*status),
             _ => {}
         }
         let _ = self.app.emit(EVENT, &event);
@@ -233,6 +239,9 @@ pub struct Snapshot {
     scanning: Option<Scanning>,
     scrobbling: Option<ScrobbleStatus>,
     scrobbling_available: bool,
+    /// Синхронизация плейлистов через аккаунт Scrobb.
+    playlist_sync: Option<PlaylistSyncStatus>,
+    playlist_sync_available: bool,
     /// Плейлист, с которым запустили приложение.
     opened_playlist: Option<PlaylistId>,
 }
@@ -252,6 +261,8 @@ pub fn snapshot(player: State<'_, Player>) -> Result<Snapshot, CoreError> {
         scanning: player.library.scanning(),
         scrobbling: *lock(&player.forwarder.scrobbling),
         scrobbling_available: player.scrobbling_available,
+        playlist_sync: *lock(&player.forwarder.playlist_sync),
+        playlist_sync_available: player.playlist_sync_available,
         opened_playlist: lock(&player.opened).clone(),
     })
 }

@@ -1,6 +1,6 @@
 //! Связь со Scrobb из потока истории: привязка устройства (RFC 8628,
-//! `docs/architecture.md` §18.4), «сейчас играет» (§18.7) и отправка
-//! очереди засчитанного (§18.8).
+//! `docs/architecture.md` §18.4), «сейчас играет» (§18.7), отправка
+//! очереди засчитанного (§18.8) и синхронизация плейлистов ([`crate::sync`]).
 //!
 //! Протокол строит и разбирает `scrobb-client`, запросы выполняет порт
 //! `HttpTransport`, токен лежит только в хранилище секретов ОС.
@@ -17,6 +17,7 @@ use scrobb_client::retry::{Backoff, SendStatus};
 use scrobb_client::{ApiError, DevicePoll, ScrobbClient};
 use scrobb_rules::{NowPlayingAction, NowPlayingGate};
 
+use crate::sync::{PlaylistSync, PlaylistSyncState};
 use crate::{Event, Observer, ScrobbleState, ScrobbleStatus};
 
 /// Ключ токена устройства Scrobb в хранилище секретов.
@@ -56,6 +57,8 @@ pub(crate) struct Remote {
     /// Что сейчас звучит — для «сейчас играет».
     playing: Option<TrackSnapshot>,
     paused: bool,
+    /// Синхронизация плейлистов; `None` — хранилища плейлистов нет.
+    sync: Option<PlaylistSync>,
 }
 
 /// Идёт привязка: ждём, пока пользователь подтвердит код на сайте.
@@ -79,12 +82,14 @@ impl Remote {
         store: Arc<dyn HistoryStore>,
         clock: Arc<dyn Clock>,
         observer: Arc<dyn Observer>,
+        sync: Option<PlaylistSync>,
     ) -> Self {
         Self {
             ports,
             store,
             clock,
             observer,
+            sync,
             backoff: Backoff::default(),
             revoked: None,
             linked: false,
@@ -117,7 +122,19 @@ impl Remote {
             SendStatus::Waiting { until_ms } => Some(until_ms.max(self.next_send_ms)),
             SendStatus::Ready | SendStatus::Unauthorized => Some(self.next_send_ms),
         };
-        [link, send, self.gate.next_poll_ms()]
+        // Синхронизация — только когда к API можно обращаться.
+        let sync = self
+            .sync
+            .as_ref()
+            .filter(|_| {
+                self.linked
+                    && !matches!(
+                        self.backoff.status(),
+                        SendStatus::Unauthorized | SendStatus::UpgradeRequired
+                    )
+            })
+            .map(PlaylistSync::deadline);
+        [link, send, self.gate.next_poll_ms(), sync]
             .into_iter()
             .flatten()
             .min()
@@ -132,6 +149,9 @@ impl Remote {
         self.send_now_playing(action, None);
         if now >= self.next_send_ms {
             self.deliver();
+        }
+        if self.sync.as_ref().is_some_and(|s| now >= s.deadline()) {
+            self.sync_playlists();
         }
     }
 
@@ -251,6 +271,11 @@ impl Remote {
             self.send_now_playing(action, None);
         }
         self.deliver();
+        // Аккаунт мог смениться: плейлисты — заново, все в обе стороны.
+        if let Some(sync) = self.sync.as_mut() {
+            sync.restart();
+        }
+        self.sync_playlists();
     }
 
     /// Отвязать устройство: снять «сейчас играет», отозвать токен на сервере
@@ -284,6 +309,61 @@ impl Remote {
         self.revoked = None;
         self.linked = self.token().is_some();
         self.publish();
+        self.publish_sync();
+    }
+
+    // --- Плейлисты ---
+
+    /// Здесь правили плейлисты (в `at_ms`, монотонные часы): отправить вскоре.
+    pub fn playlists_edited(&mut self, at_ms: u64) {
+        if let Some(sync) = self.sync.as_mut() {
+            sync.edited(at_ms);
+        }
+    }
+
+    /// Синхронизировать сейчас, не дожидаясь срока и повтора.
+    pub fn sync_now(&mut self) {
+        if let Some(sync) = self.sync.as_mut() {
+            sync.now();
+        }
+        self.sync_playlists();
+    }
+
+    /// Обменяться правками плейлистов с сервером, если устройство привязано.
+    pub fn sync_playlists(&mut self) {
+        if self.sync.is_none() {
+            return;
+        }
+        let Some(token) = self.usable_token() else {
+            self.publish_sync();
+            return;
+        };
+        let client = self.ports.client.clone().with_token(&token);
+        let blocked = match self.sync.as_mut() {
+            Some(sync) => sync.run(&client, &*self.ports.http).err(),
+            None => None,
+        };
+        if let Some(e) = blocked {
+            self.stop_sending(&e, token);
+            self.publish();
+        }
+        self.publish_sync();
+    }
+
+    /// Состояние синхронизации плейлистов с учётом связи со Scrobb.
+    fn publish_sync(&mut self) {
+        let blocked = if !self.linked {
+            Some(PlaylistSyncState::NotLinked)
+        } else {
+            match self.backoff.status() {
+                SendStatus::Unauthorized => Some(PlaylistSyncState::Unauthorized),
+                SendStatus::UpgradeRequired => Some(PlaylistSyncState::UpgradeRequired),
+                _ => None,
+            }
+        };
+        if let Some(sync) = self.sync.as_mut() {
+            sync.publish(blocked);
+        }
     }
 
     // --- «Сейчас играет» ---
@@ -499,7 +579,7 @@ impl Remote {
 }
 
 /// Случайное число из `[0, 1)` для разброса повторов.
-fn jitter() -> f64 {
+pub(crate) fn jitter() -> f64 {
     getrandom::u64().map_or(0.5, |r| (r >> 11) as f64 / (1u64 << 53) as f64)
 }
 

@@ -51,6 +51,22 @@ export interface ScrobbleStatus {
   state: ScrobbleState;
 }
 
+/** Синхронизация плейлистов через аккаунт Scrobb (`player_core::PlaylistSyncState`). */
+export type PlaylistSyncState =
+  | "not_linked"
+  | "syncing"
+  | "synced"
+  | "retrying"
+  | "unauthorized"
+  | "upgrade_required"
+  | "unsupported";
+
+export interface PlaylistSyncStatus {
+  state: PlaylistSyncState;
+  /** Последний удачный обмен, мс Unix. */
+  last_synced_ms: number | null;
+}
+
 export type Command =
   | { type: "play_queue"; data: { tracks: TrackId[]; start: number } }
   | { type: "pause" }
@@ -63,12 +79,15 @@ export type Command =
   | { type: "set_volume"; data: number }
   | { type: "link_scrobb_account"; data: { device_name: string } }
   | { type: "cancel_scrobb_link" }
-  | { type: "unlink_scrobb_account" };
+  | { type: "unlink_scrobb_account" }
+  | { type: "sync_playlists" };
 
 export type CoreEvent =
   | { type: "state"; data: PlayerState }
   | { type: "scrobb_link_code"; data: { user_code: string; verification_uri_complete: string } }
   | { type: "scrobbling"; data: ScrobbleStatus }
+  | { type: "playlist_sync"; data: PlaylistSyncStatus }
+  | { type: "playlists_changed" }
   | { type: "error"; data: string };
 
 export type CoreError =
@@ -135,6 +154,9 @@ export interface Snapshot {
   scanning: Scanning | null;
   scrobbling: ScrobbleStatus | null;
   scrobbling_available: boolean;
+  /** Синхронизация плейлистов; `null` — ядро ещё не сообщило. */
+  playlist_sync: PlaylistSyncStatus | null;
+  playlist_sync_available: boolean;
   /** Плейлист, с которым запустили приложение («Открыть с помощью»). */
   opened_playlist: PlaylistId | null;
 }

@@ -25,6 +25,9 @@ pub mod paths {
     pub const DEVICE_TOKEN: &str = "/api/v1/devices/token";
     /// Выход: отзыв токена текущего устройства.
     pub const DEVICE_CURRENT: &str = "/api/v1/devices/current";
+    /// Синхронизация плейлистов: отправить изменённое, получить изменённое
+    /// (`docs/playlists.md` §7; тело и ответ — `scrobb_sync::playlists`).
+    pub const SYNC_PLAYLISTS: &str = "/api/v1/sync/playlists";
 }
 
 /// Максимум прослушиваний в одном запросе (§18.3).

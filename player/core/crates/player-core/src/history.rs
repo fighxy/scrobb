@@ -1,7 +1,8 @@
 //! Поток истории: по фактам от фасада («зазвучал», «пауза», «закончился так-то»)
 //! ведёт счётчик прослушивания и пишет историю (`docs/player-history.md`,
-//! `docs/architecture.md` §18.7). Связь со Scrobb — привязка, «сейчас играет»
-//! и отправка засчитанного — в [`crate::scrobb`] и работает в этом же потоке.
+//! `docs/architecture.md` §18.7). Связь со Scrobb — привязка, «сейчас играет»,
+//! отправка засчитанного и синхронизация плейлистов — в [`crate::scrobb`] и
+//! работает в этом же потоке.
 //!
 //! Таймеры порога, контрольных точек, опроса привязки и повторов отправки — в
 //! одном цикле `recv_timeout`: любое изменение приходит сообщением, поэтому
@@ -74,6 +75,13 @@ pub(crate) enum Message {
     },
     CancelLink,
     Unlink,
+    /// Здесь правили плейлисты: отправить их на сервер вскоре. Время —
+    /// самой правки: сообщение могут прочитать позже.
+    PlaylistsEdited {
+        at: Stamp,
+    },
+    /// Синхронизировать плейлисты сейчас.
+    SyncPlaylists,
 }
 
 pub(crate) struct HistoryService {
@@ -127,6 +135,7 @@ impl HistoryService {
         self.check(recovered);
         if let Some(remote) = self.remote.as_mut() {
             remote.deliver();
+            remote.sync_playlists();
         }
         loop {
             let received = match self.next_deadline() {
@@ -216,6 +225,16 @@ impl HistoryService {
             Message::Unlink => {
                 if let Some(remote) = self.remote.as_mut() {
                     remote.unlink();
+                }
+            }
+            Message::PlaylistsEdited { at } => {
+                if let Some(remote) = self.remote.as_mut() {
+                    remote.playlists_edited(at.mono_ms);
+                }
+            }
+            Message::SyncPlaylists => {
+                if let Some(remote) = self.remote.as_mut() {
+                    remote.sync_now();
                 }
             }
         }

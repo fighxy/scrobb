@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { toast as notify } from "sonner";
-import type { Backend, Command, PlayerState, PlaylistId, PlayRecord, Scanning, ScrobbleStatus, Track, TrackId } from "./core";
+import type { Backend, Command, PlayerState, PlaylistId, PlaylistSyncStatus, PlayRecord, Scanning, ScrobbleStatus, Track, TrackId } from "./core";
 import { describeError } from "./core";
 import { livePosition } from "./format";
 
@@ -28,6 +28,8 @@ export function usePlayer(backend: Backend) {
   const [scanning, setScanning] = useState<Scanning | null>(null);
   const [scrobbling, setScrobbling] = useState<ScrobbleStatus | null>(null);
   const [scrobblingAvailable, setScrobblingAvailable] = useState(false);
+  const [playlistSync, setPlaylistSync] = useState<PlaylistSyncStatus | null>(null);
+  const [playlistSyncAvailable, setPlaylistSyncAvailable] = useState(false);
   const [openedPlaylist, setOpenedPlaylist] = useState<PlaylistId | null>(null);
   const [linkCode, setLinkCode] = useState<LinkCode | null>(null);
   const [history, setHistory] = useState<PlayRecord[]>([]);
@@ -69,6 +71,9 @@ export function usePlayer(backend: Backend) {
         case "scrobb_link_code":
           setLinkCode(event.data);
           break;
+        case "playlist_sync":
+          setPlaylistSync(event.data);
+          break;
         case "error":
           toast(event.data);
           break;
@@ -96,6 +101,8 @@ export function usePlayer(backend: Backend) {
       setScanning(snap.scanning);
       setScrobbling((current) => current ?? snap.scrobbling);
       setScrobblingAvailable(snap.scrobbling_available);
+      setPlaylistSync((current) => current ?? snap.playlist_sync);
+      setPlaylistSyncAvailable(snap.playlist_sync_available);
       setOpenedPlaylist(snap.opened_playlist);
     }, (e) => toast(describeError(e)));
     refreshHistory();
@@ -124,6 +131,26 @@ export function usePlayer(backend: Backend) {
     },
     [backend, toast],
   );
+
+  // «Синхронизировать сейчас»: значок у плейлистов и возвращение окна на экран.
+  // Фокус приходит часто, поэтому сам по себе — не чаще раза в 15 секунд.
+  const lastSync = useRef(0);
+  const syncPlaylists = useCallback(
+    (force = true) => {
+      const now = Date.now();
+      if (!force && now - lastSync.current < 15_000) return;
+      lastSync.current = now;
+      run({ type: "sync_playlists" });
+    },
+    [run],
+  );
+  const syncLinked = playlistSync !== null && playlistSync.state !== "not_linked";
+  useEffect(() => {
+    if (!playlistSyncAvailable || !syncLinked) return;
+    const onFocus = () => syncPlaylists(false);
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, [playlistSyncAvailable, syncLinked, syncPlaylists]);
 
   const addFiles = useCallback(async () => {
     try {
@@ -168,6 +195,9 @@ export function usePlayer(backend: Backend) {
     scanning,
     scrobbling,
     scrobblingAvailable,
+    playlistSync,
+    playlistSyncAvailable,
+    syncPlaylists,
     openedPlaylist,
     linkCode,
     history,

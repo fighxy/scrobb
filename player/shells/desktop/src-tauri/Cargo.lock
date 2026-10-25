@@ -3153,6 +3153,7 @@ version = "0.0.0"
 dependencies = [
  "player-domain",
  "quick-xml",
+ "scrobb-sync",
  "serde",
  "serde_json",
 ]
@@ -3732,6 +3733,7 @@ name = "scrobb-client"
 version = "0.0.0"
 dependencies = [
  "scrobb-api",
+ "scrobb-sync",
  "serde",
  "serde_json",
 ]

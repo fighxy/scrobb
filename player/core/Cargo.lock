@@ -790,6 +790,7 @@ dependencies = [
  "player-domain",
  "player-testkit",
  "quick-xml",
+ "scrobb-sync",
  "serde",
  "serde_json",
 ]
@@ -826,6 +827,11 @@ dependencies = [
  "player-history",
  "player-playlists",
  "player-ports",
+ "scrobb-api",
+ "scrobb-client",
+ "scrobb-sync",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -991,6 +997,7 @@ name = "scrobb-client"
 version = "0.0.0"
 dependencies = [
  "scrobb-api",
+ "scrobb-sync",
  "serde",
  "serde_json",
 ]

@@ -1,6 +1,6 @@
 [package]
 name = "scrobb-sync"
-description = "Синхронизация рейтингов и плейлистов через аккаунт Scrobb (заготовка)"
+description = "Синхронизация правок пользователя через аккаунт Scrobb: часы, слияние, обмен с сервером, ключ трека"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

@@ -1,18 +1,24 @@
-//! Синхронизация состояния библиотеки через аккаунт Scrobb (заготовка).
+//! Синхронизация правок пользователя через аккаунт Scrobb.
 //!
-//! Синхронизируются рейтинги, «любимые», плейлисты и позиции — но не файлы:
-//! на каждом устройстве свои файлы, поэтому трек узнаётся по [`TrackKey`],
-//! а не по пути. Те же записи будет показывать и править веб-приложение
-//! Scrobb, поэтому крейт относится к ярусу Scrobb и собирается под wasm.
+//! Синхронизируются плейлисты, позже — рейтинги, «любимые» и позиции, но не
+//! файлы: на каждом устройстве свои файлы, поэтому трек узнаётся по
+//! [`TrackKey`], MBID и ISRC, а не по пути. Те же записи будет показывать и
+//! править веб-приложение Scrobb, поэтому крейт относится к ярусу Scrobb и
+//! собирается под wasm.
 //!
-//! Сервер для этого ещё не спроектирован: нужны эндпоинты синхронизации.
-//! Нормализация ключа уже общая с бэкендом: [`norm`] и [`TrackKey::new`]
-//! сверяются с векторами `contracts/match-key/v1.json`.
+//! - Время правок — гибридные логические часы [`Hlc`], поля — [`Lww`].
+//! - Плейлисты — [`playlists`]: записи, слияние и формат обмена с сервером
+//!   (`docs/playlists.md` §7), векторы `contracts/playlist-sync/v1.json`.
+//! - Ключ трека общий с бэкендом: [`norm`] и [`TrackKey::new`] сверяются с
+//!   векторами `contracts/match-key/v1.json`.
 
 use serde::{Deserialize, Serialize};
 
+mod hlc;
 mod key;
+pub mod playlists;
 
+pub use hlc::{BadHlc, Hlc, Lww};
 pub use key::{norm, primary_artist, strip_feat};
 
 /// Ключ трека, общий для всех устройств и сервера.
@@ -42,55 +48,7 @@ impl TrackKey {
     }
 }
 
-/// Гибридные логические часы: упорядочивают правки с разных устройств
-/// даже при расхождении системных часов.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct Hlc {
-    /// Физическое время, миллисекунды Unix.
-    pub wall_ms: u64,
-    /// Счётчик для событий в одну миллисекунду.
-    pub counter: u32,
-    /// Идентификатор устройства — разрешает ничьи.
-    pub node: u32,
-}
-
-impl Hlc {
-    /// Следующая метка для локальной правки.
-    pub fn tick(self, now_ms: u64) -> Self {
-        if now_ms > self.wall_ms {
-            Self {
-                wall_ms: now_ms,
-                counter: 0,
-                node: self.node,
-            }
-        } else {
-            Self {
-                counter: self.counter + 1,
-                ..self
-            }
-        }
-    }
-}
-
-/// Регистр «последняя запись побеждает».
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Lww<T> {
-    /// Значение.
-    pub value: T,
-    /// Когда и где его записали.
-    pub stamp: Hlc,
-}
-
-impl<T> Lww<T> {
-    /// Слияние с правкой с другого устройства или сервера.
-    pub fn merge(&mut self, other: Lww<T>) {
-        if other.stamp > self.stamp {
-            *self = other;
-        }
-    }
-}
-
-/// Синхронизируемая правка.
+/// Синхронизируемая правка рейтинга или «любимого» (заготовка: в плеере их ещё нет).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum SyncOp {
@@ -108,22 +66,4 @@ pub enum SyncOp {
         /// Значение.
         loved: Lww<bool>,
     },
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn later_stamp_wins_regardless_of_arrival_order() {
-        let a = Hlc {
-            wall_ms: 100,
-            counter: 0,
-            node: 1,
-        };
-        let b = a.tick(100);
-        let mut reg = Lww { value: 5, stamp: b };
-        reg.merge(Lww { value: 9, stamp: a });
-        assert_eq!(reg.value, 5);
-    }
 }

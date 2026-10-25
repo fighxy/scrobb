@@ -13,7 +13,7 @@ import { Sidebar } from "./components/Sidebar";
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "./components/ui/resizable";
 import { Toaster } from "./components/ui/sonner";
 import { TooltipProvider } from "./components/ui/tooltip";
-import { type Backend, describeError } from "./core";
+import { type Backend, describeError, deviceName } from "./core";
 import { coverOf, groupLibrary } from "./lib/library";
 import { useNav, type View } from "./lib/nav";
 import { useTheme } from "./lib/theme";
@@ -101,8 +101,14 @@ export function App({ backend }: { backend: Backend }) {
         backend.revealInFolder(path).catch((e) => p.toast(describeError(e)));
       },
       playlists,
+      sync: {
+        status: p.playlistSync,
+        available: p.playlistSyncAvailable,
+        now: () => p.syncPlaylists(),
+        link: () => run({ type: "link_scrobb_account", data: { device_name: deviceName() } }),
+      },
     }),
-    [backend, lib, tracks, state, queue, nav.go, run, p.toast, playlists],
+    [backend, lib, tracks, state, queue, nav.go, run, p.toast, playlists, p.playlistSync, p.playlistSyncAvailable, p.syncPlaylists],
   );
 
   const topBar = (
@@ -123,7 +129,14 @@ export function App({ backend }: { backend: Backend }) {
         <kbd className="hidden rounded bg-surface-raised px-1.5 py-0.5 font-sans text-[11px] sm:inline">{IS_MAC ? "⌘K" : "Ctrl K"}</kbd>
       </button>
       <div className="ml-auto flex shrink-0 items-center">
-        <ScrobbLink status={p.scrobbling} available={p.scrobblingAvailable} code={p.linkCode} run={run} openUrl={(url) => void backend.openUrl(url)} />
+        <ScrobbLink
+          status={p.scrobbling}
+          available={p.scrobblingAvailable}
+          code={p.linkCode}
+          run={run}
+          openUrl={(url) => void backend.openUrl(url)}
+          playlistSync={p.playlistSyncAvailable ? p.playlistSync : null}
+        />
       </div>
     </>
   );

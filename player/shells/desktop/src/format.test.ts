@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import type { PlayerState } from "./core";
-import { ALBUMS, artists, count, duration, folderName, livePosition, longDuration, playedAt, plural, TRACKS } from "./format";
+import type { PlayerState, PlaylistSyncState } from "./core";
+import { ago, ALBUMS, artists, count, duration, folderName, livePosition, longDuration, playedAt, plural, syncLabel, TRACKS } from "./format";
 
 const state = (patch: Partial<PlayerState>): PlayerState => ({
   status: "playing",
@@ -45,6 +45,25 @@ describe("playedAt", () => {
     const now = new Date(2026, 9, 25, 18, 0).getTime();
     expect(playedAt(new Date(2026, 9, 25, 14, 5).getTime(), now)).toBe("14:05");
     expect(playedAt(new Date(2026, 9, 3, 9, 7).getTime(), now)).toMatch(/^3 окт.*09:07$/);
+  });
+});
+
+describe("ago and syncLabel", () => {
+  const now = new Date(2026, 9, 25, 18, 0).getTime();
+  it("says how long ago, then switches to the time", () => {
+    expect(ago(now - 20_000, now)).toBe("только что");
+    expect(ago(now - 5 * 60_000, now)).toBe("5\u00a0мин назад");
+    expect(ago(new Date(2026, 9, 25, 14, 5).getTime(), now)).toBe("в 14:05");
+    expect(ago(new Date(2026, 9, 3, 9, 7).getTime(), now)).toMatch(/^3 окт.*09:07$/);
+  });
+  it("explains every sync state", () => {
+    const at = (state: PlaylistSyncState, last: number | null = now - 120_000) => syncLabel({ state, last_synced_ms: last }, now);
+    expect(syncLabel(null, now)).toMatch(/^Подключите Scrobb/);
+    expect(at("synced")).toBe("Плейлисты синхронизированы 2\u00a0мин назад");
+    expect(at("retrying")).toBe("Нет связи со Scrobb — правки уйдут позже (последний раз 2\u00a0мин назад)");
+    expect(at("retrying", null)).toBe("Нет связи со Scrobb — правки уйдут позже");
+    expect(at("unsupported")).toMatch(/пока не умеет/);
+    expect(at("unauthorized")).toMatch(/^Войдите в Scrobb заново/);
   });
 });
 

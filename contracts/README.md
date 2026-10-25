@@ -5,6 +5,7 @@
 | Контракт | Что описывает | Кто проверяет |
 |---|---|---|
 | [`scrobble-rules/v1.json`](scrobble-rules/v1.json) | Правило скроббла: порог прослушивания и подсчёт реального времени звучания ([architecture.md](../docs/architecture.md) §18.7) | Ядро плеера: `player/core/crates/scrobb-rules/tests/vectors.rs`. Позже — бэкенд (повторная проверка, §11.1, шаг 6), расширение и десктоп-клиент |
+| [`playlist-sync/v1.json`](playlist-sync/v1.json) | Слияние записей синхронизации плейлистов ([playlists.md](../docs/playlists.md) §7–§8): формат меток HLC, «последняя запись побеждает» по полям, неизменное с создания, окончательное удаление. Любой порядок и повторы дают один результат | Ядро плеера: `player/core/crates/scrobb-sync/tests/playlist_vectors.rs` (все порядки слияния и повтор). Бэкенд — при реализации `POST /api/v1/sync/playlists` |
 | [`match-key/v1.json`](match-key/v1.json) | Нормализация ключа трека «артист + название» ([architecture.md](../docs/architecture.md) §2.4): NFKC, «ё» → «е», casefold, вставки `feat.`/`ft.`/`при участии`. По ключу плеер и сервер узнают один трек на разных устройствах и в разных источниках — плейлисты ([playlists.md](../docs/playlists.md) §4), синхронизация, сопоставление скробблов | Ядро плеера: `player/core/crates/scrobb-sync/tests/vectors.rs`. Бэкенд — эталон на Python в §2.4 проходит все векторы; тест появится вместе с `IngestService` |
 
 Планируется:

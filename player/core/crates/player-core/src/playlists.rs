@@ -1,9 +1,11 @@
 //! Плейлисты в фасаде: правки, поиск треков в библиотеке, импорт и экспорт.
 //!
 //! Хранилище (`player-playlists::PlaylistStore`) только хранит; здесь
-//! задаются id (UUIDv7), время и ключи порядка, а элементы связываются
-//! с библиотекой этого устройства (`TrackStore::resolve`). Трек, которого
-//! в библиотеке нет, остаётся в плейлисте с `track_id: null`.
+//! задаются id (UUIDv7), время, метки гибридных часов ([`crate::sync`]) и
+//! ключи порядка, а элементы связываются с библиотекой этого устройства
+//! (`TrackStore::resolve`). Трек, которого в библиотеке нет, остаётся в
+//! плейлисте с `track_id: null`. После каждой правки поток связи со Scrobb
+//! получает знак отправить её на сервер.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -12,11 +14,12 @@ use player_domain::{TrackId, TrackSnapshot};
 use player_library::TrackQuery;
 use player_playlists::formats::{self, Exported, Format};
 use player_playlists::{
-    ItemId, Playlist, PlaylistContents, PlaylistId, PlaylistItem, PlaylistStore, order, paths,
+    Edit, ItemId, Playlist, PlaylistContents, PlaylistId, PlaylistItem, PlaylistStore, order, paths,
 };
 use serde::Serialize;
 use uuid::{Timestamp, Uuid};
 
+use crate::history::Message;
 use crate::{Core, CoreError, Inner, lock};
 
 /// Сколько обложек в мозаике плейлиста.
@@ -84,6 +87,21 @@ impl Inner {
         Uuid::new_v7(ts).to_string()
     }
 
+    /// Хранилище и метка новой правки.
+    fn editing(&self) -> Result<(&Arc<dyn PlaylistStore>, Edit), CoreError> {
+        let store = store(self)?;
+        let edits = self
+            .edits
+            .as_ref()
+            .ok_or(CoreError::MissingPort("playlists"))?;
+        Ok((store, edits.edit()))
+    }
+
+    /// Правка сохранена: отправить её на сервер вскоре.
+    fn edited(&self) {
+        self.report(|at| Message::PlaylistsEdited { at });
+    }
+
     fn contents(&self, id: &PlaylistId) -> Result<PlaylistContents, CoreError> {
         store(self)?
             .get(id)
@@ -101,7 +119,8 @@ impl Inner {
         description: Option<&str>,
         origin: Option<String>,
     ) -> Result<Playlist, CoreError> {
-        let now = self.clock.unix_ms();
+        let (store, edit) = self.editing()?;
+        let now = edit.at_ms;
         let playlist = Playlist {
             id: PlaylistId(self.new_id(now)),
             title: title.trim().to_owned(),
@@ -116,7 +135,8 @@ impl Inner {
         if playlist.title.is_empty() {
             return Err(CoreError::Playlist("у плейлиста нет названия".into()));
         }
-        store(self)?.create(&playlist).map_err(failed)?;
+        store.create(&playlist, edit).map_err(failed)?;
+        self.edited();
         Ok(playlist)
     }
 }
@@ -199,17 +219,19 @@ impl Core {
             return Err(CoreError::Playlist("у плейлиста нет названия".into()));
         }
         let description = description.map(str::trim).filter(|d| !d.is_empty());
-        store(inner)?
-            .update(id, title, description, inner.clock.unix_ms())
-            .map_err(failed)
+        let (store, edit) = inner.editing()?;
+        store.update(id, title, description, edit).map_err(failed)?;
+        inner.edited();
+        Ok(())
     }
 
     /// Удалить плейлист.
     pub fn delete_playlist(&self, id: &PlaylistId) -> Result<(), CoreError> {
         let inner = self.inner();
-        store(inner)?
-            .delete(id, inner.clock.unix_ms())
-            .map_err(failed)
+        let (store, edit) = inner.editing()?;
+        store.delete(id, edit).map_err(failed)?;
+        inner.edited();
+        Ok(())
     }
 
     /// Добавить треки библиотеки на место `at` (`None` — в конец). Неизвестные
@@ -231,7 +253,8 @@ impl Core {
             .checked_sub(1)
             .map(|i| contents.items[i].position.as_str());
         let after = contents.items.get(at).map(|i| i.position.as_str());
-        let now = inner.clock.unix_ms();
+        let (store, edit) = inner.editing()?;
+        let now = edit.at_ms;
         let items: Vec<PlaylistItem> = found
             .iter()
             .zip(order::spread(before, after, found.len()))
@@ -244,7 +267,8 @@ impl Core {
             })
             .collect();
         if !items.is_empty() {
-            store(inner)?.add_items(id, &items, now).map_err(failed)?;
+            store.add_items(id, &items, edit).map_err(failed)?;
+            inner.edited();
         }
         Ok(items.len())
     }
@@ -252,9 +276,10 @@ impl Core {
     /// Убрать элементы.
     pub fn remove_from_playlist(&self, id: &PlaylistId, items: &[ItemId]) -> Result<(), CoreError> {
         let inner = self.inner();
-        store(inner)?
-            .remove_items(id, items, inner.clock.unix_ms())
-            .map_err(failed)
+        let (store, edit) = inner.editing()?;
+        store.remove_items(id, items, edit).map_err(failed)?;
+        inner.edited();
+        Ok(())
     }
 
     /// Переставить элемент так, чтобы он стал `to`-м по счёту.
@@ -286,9 +311,12 @@ impl Core {
             return self.renumber(id, &others, item, to);
         }
         let position = order::between(before, after);
-        store(inner)?
-            .set_position(id, item, &position, inner.clock.unix_ms())
-            .map_err(failed)
+        let (store, edit) = inner.editing()?;
+        store
+            .set_position(id, item, &position, edit)
+            .map_err(failed)?;
+        inner.edited();
+        Ok(())
     }
 
     fn renumber(
@@ -299,16 +327,16 @@ impl Core {
         to: usize,
     ) -> Result<(), CoreError> {
         let inner = self.inner();
-        let store = store(inner)?;
+        let (store, edit) = inner.editing()?;
         let mut ids: Vec<&ItemId> = others.iter().map(|i| &i.id).collect();
         ids.insert(to, item);
-        let now = inner.clock.unix_ms();
         for (id_, key) in ids
             .into_iter()
             .zip(order::spread(None, None, others.len() + 1))
         {
-            store.set_position(id, id_, &key, now).map_err(failed)?;
+            store.set_position(id, id_, &key, edit).map_err(failed)?;
         }
+        inner.edited();
         Ok(())
     }
 
@@ -329,7 +357,8 @@ impl Core {
             .unwrap_or_else(|| paths::file_stem(file_name).to_owned());
         let origin = format!("import:{}", serde_name(format));
         let playlist = inner.create(&title, imported.description.as_deref(), Some(origin))?;
-        let now = inner.clock.unix_ms();
+        let (store, edit) = inner.editing()?;
+        let now = edit.at_ms;
         let mut matched = 0;
         let positions = order::spread(None, None, imported.entries.len());
         let items: Vec<PlaylistItem> = imported
@@ -358,9 +387,10 @@ impl Core {
             .collect();
         let total = items.len();
         if !items.is_empty() {
-            store(inner)?
-                .add_items(&playlist.id, &items, now)
+            store
+                .add_items(&playlist.id, &items, edit)
                 .map_err(failed)?;
+            inner.edited();
         }
         Ok(ImportReport {
             playlist,

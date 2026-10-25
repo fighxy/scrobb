@@ -9,8 +9,9 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import type { Command, ScrobbleStatus } from "@/core";
+import type { Command, PlaylistSyncStatus, ScrobbleStatus } from "@/core";
 import { deviceName } from "@/core";
+import { syncLabel } from "@/format";
 import { cn } from "@/lib/utils";
 import type { LinkCode } from "@/usePlayer";
 
@@ -20,12 +21,14 @@ interface Props {
   code: LinkCode | null;
   run: (command: Command) => void;
   openUrl: (url: string) => void;
+  /** Синхронизация плейлистов, если она есть на этой сборке. */
+  playlistSync?: PlaylistSyncStatus | null;
 }
 
 const chip = "inline-flex h-8 items-center gap-2 rounded-full bg-background/55 px-3 text-[13px] font-semibold text-foreground hover:bg-background/75";
 
 /** Связь с аккаунтом Scrobb: привязка по коду (RFC 8628) и состояние отправки. */
-export function ScrobbLink({ status, available, code, run, openUrl }: Props) {
+export function ScrobbLink({ status, available, code, run, openUrl, playlistSync }: Props) {
   if (!available || !status) return null;
   const link = () => run({ type: "link_scrobb_account", data: { device_name: deviceName() } });
   const queued = status.pending > 0 ? `в очереди ${status.pending}` : null;
@@ -83,6 +86,11 @@ export function ScrobbLink({ status, available, code, run, openUrl }: Props) {
               {status.state === "ready" ? "Прослушивания уходят в Scrobb" : "Нет связи с Scrobb — отправим позже"}
               {queued ? `, ${queued}` : ""}
             </DropdownMenuLabel>
+            {playlistSync && (
+              <DropdownMenuItem onSelect={() => run({ type: "sync_playlists" })} className="text-muted-foreground">
+                {syncLabel(playlistSync)}
+              </DropdownMenuItem>
+            )}
             <DropdownMenuSeparator />
             <DropdownMenuItem onSelect={() => run({ type: "unlink_scrobb_account" })}>
               <Unlink />
