@@ -40,8 +40,20 @@ sys.exit(0 if sys.argv[2] in titles else 1)
 PY
 }
 
+deb_installed() {
+  # shellcheck disable=SC2016  # ${Status} — поле dpkg-query, не переменная
+  [ "$(dpkg-query -W -f='${Status}' scrobb-player 2>/dev/null)" = 'install ok installed' ]
+}
+
 work=$(mktemp -d)
-trap 'kill "$xvfb" 2>/dev/null || true; rm -rf "$work"' EXIT
+# Код выхода — свой: в старом bash ловушка EXIT подменяет его кодом последней команды.
+cleanup() {
+  local status=$?
+  kill "${xvfb:-}" 2>/dev/null || true
+  rm -rf "$work"
+  exit "$status"
+}
+trap cleanup EXIT
 Xvfb :97 -screen 0 1280x800x24 >/dev/null 2>&1 &
 xvfb=$!
 export DISPLAY=:97
@@ -57,7 +69,7 @@ run_player() {
   XDG_DATA_HOME="$data" "$@" "$playlist" >"$work/$name.log" 2>&1 &
   local pid=$!
   local db="$data/ru.scrobb.player/user.db"
-  check "$name: плейлист «$title» импортирован" wait_until 60 has_playlist "$db" "$title"
+  check "$name: плейлист «${title}» импортирован" wait_until 60 has_playlist "$db" "$title"
   sleep 3
   check "$name: плеер работает" kill -0 "$pid"
   if [ -n "$screenshot" ] && command -v import >/dev/null; then
@@ -72,7 +84,7 @@ run_player() {
 # 1. deb: зависимости из Depends ставит apt.
 $sudo apt-get install -y --no-install-recommends "$deb" >"$work/apt.log" 2>&1 \
   || { cat "$work/apt.log" >&2; exit 1; }
-check 'deb установлен' dpkg-query -W -f='' scrobb-player
+check 'deb установлен' deb_installed
 check 'программа в /usr/bin' test -x /usr/bin/scrobb-player
 check 'ярлык в меню приложений' test -f '/usr/share/applications/Scrobb Player.desktop'
 check 'значок' test -f /usr/share/icons/hicolor/128x128/apps/scrobb-player.png

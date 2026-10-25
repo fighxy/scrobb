@@ -40,7 +40,15 @@ PY
 work=$(mktemp -d)
 mnt="$work/mnt"
 mkdir "$mnt"
-trap 'hdiutil detach "$mnt" -quiet 2>/dev/null || true; rm -rf "$work"' EXIT
+# Код выхода — свой: bash 3.2 из macOS иначе подменяет его кодом последней
+# команды ловушки, и провал проверки выглядел бы успехом.
+cleanup() {
+  local status=$?
+  hdiutil detach "$mnt" -quiet 2>/dev/null || true
+  rm -rf "$work"
+  exit "$status"
+}
+trap cleanup EXIT
 
 # 1. Образ.
 hdiutil attach "$dmg" -nobrowse -readonly -mountpoint "$mnt" >/dev/null
@@ -60,7 +68,7 @@ printf '#EXTM3U\n#EXTINF:215,Кино - Кукушка\nКино - Кукушк�
 db="$HOME/Library/Application Support/ru.scrobb.player/user.db"
 "$work/Scrobb Player.app/$exe" "$playlist" >"$work/player.log" 2>&1 &
 pid=$!
-check "плейлист «$title» импортирован" wait_until 60 has_playlist "$db" "$title"
+check "плейлист «${title}» импортирован" wait_until 60 has_playlist "$db" "$title"
 sleep 3
 check 'плеер работает' kill -0 "$pid"
 if [ -n "$screenshot" ]; then
