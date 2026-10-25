@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import type { Backend, Command, PlayerState, PlayRecord, Scanning, ScrobbleStatus, Track } from "./core";
+import { useCallback, useEffect, useState } from "react";
+import { toast as notify } from "sonner";
+import type { Backend, Command, PlayerState, PlayRecord, Scanning, ScrobbleStatus, Track, TrackId } from "./core";
 import { describeError } from "./core";
 import { livePosition } from "./format";
 
@@ -12,11 +13,6 @@ const EMPTY: PlayerState = {
   shuffle: false,
   volume: 1,
 };
-
-export interface Toast {
-  id: number;
-  text: string;
-}
 
 export interface LinkCode {
   user_code: string;
@@ -34,13 +30,10 @@ export function usePlayer(backend: Backend) {
   const [scrobblingAvailable, setScrobblingAvailable] = useState(false);
   const [linkCode, setLinkCode] = useState<LinkCode | null>(null);
   const [history, setHistory] = useState<PlayRecord[]>([]);
-  const [toasts, setToasts] = useState<Toast[]>([]);
-  const nextToast = useRef(1);
+  const [queue, setQueue] = useState<TrackId[]>([]);
 
   const toast = useCallback((text: string) => {
-    const id = nextToast.current++;
-    setToasts((all) => [...all.slice(-3), { id, text }]);
-    setTimeout(() => setToasts((all) => all.filter((t) => t.id !== id)), 5000);
+    notify(text);
   }, []);
 
   const refreshHistory = useCallback(() => {
@@ -112,8 +105,19 @@ export function usePlayer(backend: Backend) {
     };
   }, [backend, refreshHistory, refreshLibrary, toast]);
 
+  // Очередь меняет только `play_queue`: из окна она известна сразу, а очередь,
+  // собранную оболочкой (файлы из командной строки), перечитываем, если
+  // снимок с ней не сходится.
+  const length = state.queue_position?.[1];
+  const currentId = state.current?.id;
+  const queueStale = length !== undefined && (length !== queue.length || (currentId !== undefined && !queue.includes(currentId)));
+  useEffect(() => {
+    if (queueStale) backend.queue().then(setQueue, () => {});
+  }, [backend, queueStale]);
+
   const run = useCallback(
     (command: Command) => {
+      if (command.type === "play_queue") setQueue(command.data.tracks);
       backend.dispatch(command).catch((e) => toast(describeError(e)));
     },
     [backend, toast],
@@ -164,7 +168,8 @@ export function usePlayer(backend: Backend) {
     scrobblingAvailable,
     linkCode,
     history,
-    toasts,
+    queue,
+    toast,
     run,
     addFiles,
     addFolder,
@@ -183,4 +188,40 @@ export function useLivePosition(state: PlayerState, receivedAt: number): number 
     return () => clearInterval(timer);
   }, [state.status, receivedAt]);
   return livePosition(state, receivedAt, Math.max(now, receivedAt));
+}
+
+const colors = new Map<TrackId, string | null>();
+
+/** Цвет обложки для фона; пока не пришёл (или обложки нет) — `null`. */
+export function useCoverColor(backend: Backend, id: TrackId | null): string | null {
+  const [color, setColor] = useState<string | null>(() => (id === null ? null : (colors.get(id) ?? null)));
+  useEffect(() => {
+    if (id === null) return setColor(null);
+    if (colors.has(id)) return setColor(colors.get(id)!);
+    let cancelled = false;
+    backend.coverColor(id).then(
+      (c) => {
+        colors.set(id, c);
+        if (!cancelled) setColor(c);
+      },
+      () => {},
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [backend, id]);
+  return color;
+}
+
+/** Совпадает ли медиазапрос — для раскладки, которой мало одного CSS. */
+export function useMediaQuery(query: string): boolean {
+  const [matches, setMatches] = useState(() => matchMedia(query).matches);
+  useEffect(() => {
+    const list = matchMedia(query);
+    const update = () => setMatches(list.matches);
+    update();
+    list.addEventListener("change", update);
+    return () => list.removeEventListener("change", update);
+  }, [query]);
+  return matches;
 }

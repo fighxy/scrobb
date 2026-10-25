@@ -424,3 +424,18 @@ fn play_and_stop_start_new_epochs() {
     }
     assert!(engine.stop() > second);
 }
+
+#[test]
+fn flac_with_embedded_cover_plays() {
+    // covered.flac — тот же a.flac с картинкой обложки в блоке PICTURE.
+    // В большинстве настоящих FLAC обложка встроена, а играть их надо так же.
+    let output = ManualOutput::default();
+    let (engine, rx) = engine(&output);
+    engine.play(track(1, "covered.flac"));
+    let played = output.collect(11_113 * 2);
+    assert!(
+        played == reference()[..11_113 * 2],
+        "covered.flac звучит не так, как a.flac"
+    );
+    wait_event(&rx, |e| *e == EngineEvent::Finished);
+}

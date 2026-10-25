@@ -12,7 +12,7 @@ use player_core::{
     Command, Core, CoreConfig, CoreError, Event, Observer, Ports, ScrobbSettings, ScrobbleStatus,
     Stores,
 };
-use player_domain::{PlayerState, Track};
+use player_domain::{PlayerState, Track, TrackId};
 use player_history::PlayRecord;
 use player_library::MemoryLibrary;
 use player_output_cpal::CpalOutput;
@@ -22,6 +22,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_opener::OpenerExt;
 
 use crate::adapters::{KeyringSecrets, LocalFiles, SystemClock, UreqHttp};
+use crate::covers::Covers;
 use crate::library::{Added, LibraryEvent, LocalLibrary, Scanning};
 
 /// Событие окна с [`Event`] ядра.
@@ -40,6 +41,7 @@ pub struct Player {
     /// Очередь папок для потока сканера: сканирование не блокирует окно.
     scanner: mpsc::Sender<String>,
     forwarder: Arc<Forwarder>,
+    covers: Arc<Covers>,
     scrobbling_available: bool,
 }
 
@@ -55,6 +57,7 @@ impl Player {
             memory.clone(),
         ));
         let scanner = spawn_scanner(library.clone(), app.clone());
+        let covers = Covers::new(memory.clone(), Arc::new(LocalFiles));
         // Базы библиотеки пока нет: запомненные папки сканируются при каждом запуске.
         for folder in library.folders() {
             let _ = scanner.send(folder);
@@ -91,6 +94,7 @@ impl Player {
             library,
             scanner,
             forwarder,
+            covers,
             scrobbling_available,
         })
     }
@@ -105,8 +109,10 @@ impl Player {
                 self.forwarder.emit_library(LibraryEvent::Error(e));
             }
         }
-        let added = self.library.add_files(files);
-        if let Some(first) = added.tracks.first() {
+        let first_file = files.first().cloned();
+        self.library.add_files(files);
+        // Первый файл мог уже найти сканер папки — тогда он не «добавлен», но играть его надо.
+        if let Some(first) = first_file.and_then(|path| self.library.track_by_path(&path)) {
             let all: Vec<_> = self.library.tracks().iter().map(|t| t.id).collect();
             let start = all.iter().position(|id| *id == first.id).unwrap_or(0);
             let play = Command::PlayQueue { tracks: all, start };
@@ -125,6 +131,11 @@ impl Player {
             let _ = self.scanner.send(folder.clone());
         }
         Ok(added.is_some())
+    }
+
+    /// Обложки для схемы `cover://`.
+    pub fn covers(&self) -> Arc<Covers> {
+        self.covers.clone()
     }
 
     /// Остановить ядро перед выходом.
@@ -229,6 +240,7 @@ pub fn remove_folder(player: State<'_, Player>, path: String) -> Result<(), Stri
 /// Пересканировать все папки: новые файлы добавятся, удалённые исчезнут.
 #[tauri::command(rename_all = "snake_case")]
 pub fn rescan_library(player: State<'_, Player>) {
+    player.covers.clear();
     for folder in player.library.folders() {
         let _ = player.scanner.send(folder);
     }
@@ -241,6 +253,25 @@ pub async fn recent_plays(
     limit: usize,
 ) -> Result<Vec<PlayRecord>, CoreError> {
     player.with_core(|core| core.recent_plays(before_ms, limit))
+}
+
+/// Треки очереди по порядку — для «Далее».
+#[tauri::command(rename_all = "snake_case")]
+pub fn queue(player: State<'_, Player>) -> Result<Vec<TrackId>, CoreError> {
+    player.with_core(|core| Ok(core.queue()))
+}
+
+/// Цвет обложки трека для фона (`#rrggbb`) или `null`, если обложки нет.
+/// Картинка раскодируется в отдельном потоке, а не в потоке окна.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn cover_color(player: State<'_, Player>, id: TrackId) -> Result<Option<String>, ()> {
+    let covers = player.covers();
+    Ok(
+        tauri::async_runtime::spawn_blocking(move || covers.color(id))
+            .await
+            .ok()
+            .flatten(),
+    )
 }
 
 /// Поток сканера: папки по одной, в порядке очереди. Папку, которую успели

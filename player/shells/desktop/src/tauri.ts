@@ -1,12 +1,17 @@
 // Бэкенд в приложении: команды Tauri из `src-tauri/src/bridge.rs`.
 
-import { invoke } from "@tauri-apps/api/core";
+import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
-import { openUrl } from "@tauri-apps/plugin-opener";
-import type { Added, Backend, CoreEvent, LibraryEvent, PlayRecord, Snapshot } from "./core";
+import { openUrl, revealItemsInDir } from "@tauri-apps/plugin-opener";
+import type { Added, Backend, CoreEvent, LibraryEvent, PlayRecord, Snapshot, TrackId } from "./core";
 
 const AUDIO = ["mp3", "flac", "ogg", "oga", "opus", "m4a", "mp4", "aac", "wav", "aiff", "aif", "alac", "caf", "mka"];
+
+// Схема обложек `src-tauri/src/covers.rs`: `cover://localhost/` или, на Windows,
+// `http://cover.localhost/`. convertFileSrc кодирует путь целиком (и «/» тоже),
+// поэтому берём от него только основу адреса.
+const COVERS = convertFileSrc("", "cover");
 
 export const tauriBackend: Backend = {
   dispatch: (command) => invoke("dispatch", { command }),
@@ -31,4 +36,8 @@ export const tauriBackend: Backend = {
     invoke<PlayRecord[]>("recent_plays", { before_ms: beforeMs, limit }),
   onEvent: (handler) => listen<CoreEvent>("core://event", (e) => handler(e.payload)),
   openUrl: (url) => openUrl(url),
+  queue: () => invoke<TrackId[]>("queue"),
+  coverUrl: (id, size) => `${COVERS}${id}/${size}`,
+  coverColor: (id) => invoke<string | null>("cover_color", { id }),
+  revealInFolder: (path) => revealItemsInDir(path),
 };

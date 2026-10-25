@@ -82,70 +82,8 @@ fn is_hidden(uri: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use player_ports::MediaStream;
-    use std::fs;
-    use std::path::{Path, PathBuf};
-    use std::time::UNIX_EPOCH;
-
-    /// Папки и файлы с диска — как адаптер оболочки.
-    struct Disk;
-
-    impl FileAccess for Disk {
-        fn list(&self, dir: &MediaUri) -> Result<Vec<FileEntry>, PortError> {
-            let read = fs::read_dir(&dir.0).map_err(|e| PortError::Other(e.to_string()))?;
-            Ok(read
-                .flatten()
-                .filter_map(|e| {
-                    let meta = e.metadata().ok()?;
-                    Some(FileEntry {
-                        uri: MediaUri(e.path().to_string_lossy().into_owned()),
-                        is_dir: e.file_type().ok()?.is_dir(),
-                        size: meta.len(),
-                        modified_ms: meta
-                            .modified()
-                            .ok()?
-                            .duration_since(UNIX_EPOCH)
-                            .ok()?
-                            .as_millis() as i64,
-                    })
-                })
-                .collect())
-        }
-
-        fn open(&self, uri: &MediaUri) -> Result<Box<dyn MediaStream>, PortError> {
-            fs::File::open(&uri.0)
-                .map(|f| Box::new(f) as Box<dyn MediaStream>)
-                .map_err(|e| PortError::Other(e.to_string()))
-        }
-    }
-
-    struct TempDir(PathBuf);
-
-    impl TempDir {
-        fn new(name: &str) -> Self {
-            let dir =
-                std::env::temp_dir().join(format!("player-scan-{name}-{}", std::process::id()));
-            let _ = fs::remove_dir_all(&dir);
-            fs::create_dir_all(&dir).unwrap();
-            Self(dir)
-        }
-
-        fn file(&self, path: &str) {
-            let path = self.0.join(path);
-            fs::create_dir_all(path.parent().unwrap()).unwrap();
-            fs::write(path, b"x").unwrap();
-        }
-
-        fn uri(&self) -> MediaUri {
-            MediaUri(self.0.to_string_lossy().into_owned())
-        }
-    }
-
-    impl Drop for TempDir {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
+    use player_testkit::disk::{Disk, TempDir};
+    use std::path::Path;
 
     fn names(root: &Path, entries: &[FileEntry]) -> Vec<String> {
         entries

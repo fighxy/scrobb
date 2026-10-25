@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use player_domain::{MediaUri, Track, TrackId};
 use player_library::scan::{self, is_inside};
-use player_library::{MemoryLibrary, tags};
+use player_library::{MemoryLibrary, TrackStore, tags};
 use serde::{Deserialize, Serialize};
 
 use crate::adapters::LocalFiles;
@@ -182,8 +182,7 @@ impl LocalLibrary {
         for entry in entries.iter().filter(|e| !known.contains(&e.uri.0)) {
             let id = self.id_for(&entry.uri.0);
             if let Ok(track) = tags::read_track(&LocalFiles, &entry.uri, id) {
-                self.memory.insert(track.clone());
-                self.state().tracks.push(track);
+                self.insert(track);
             }
             read += 1;
             progress.report(&self.state, found, read, false);
@@ -209,14 +208,33 @@ impl LocalLibrary {
             let id = self.id_for(&path);
             match tags::read_track(&LocalFiles, &MediaUri(path.clone()), id) {
                 Ok(track) => {
-                    self.memory.insert(track.clone());
-                    self.state().tracks.push(track.clone());
-                    tracks.push(track);
+                    if self.insert(track.clone()) {
+                        tracks.push(track);
+                    }
                 }
                 Err(_) => failed.push(file_name(&path)),
             }
         }
         Added { tracks, failed }
+    }
+
+    /// Трек библиотеки по пути файла.
+    pub fn track_by_path(&self, path: &str) -> Option<Track> {
+        let id = *self.state().ids.get(path)?;
+        self.memory.track(id)
+    }
+
+    /// Добавить трек, если его ещё нет; `false` — уже есть. Проверка и
+    /// добавление — под одной блокировкой: сканер и «Открыть с помощью»
+    /// могут прочитать один и тот же файл одновременно, а id у пути один.
+    fn insert(&self, track: Track) -> bool {
+        let mut state = self.state();
+        if self.memory.track(track.id).is_some() {
+            return false;
+        }
+        self.memory.insert(track.clone());
+        state.tracks.push(track);
+        true
     }
 
     fn id_for(&self, path: &str) -> TrackId {
@@ -456,6 +474,31 @@ mod tests {
         let added = library.add_files(vec![tagged.clone(), tagged.clone(), missing]);
         assert_eq!(added.tracks.len(), 1);
         assert_eq!(added.failed, ["nope.flac"]);
-        assert!(library.add_files(vec![tagged]).tracks.is_empty());
+        assert!(library.add_files(vec![tagged.clone()]).tracks.is_empty());
+        assert_eq!(
+            library.track_by_path(&tagged).map(|t| t.title),
+            Some("Кукушка".into())
+        );
+        assert_eq!(
+            library.track_by_path(&fixture("a.flac").to_string_lossy()),
+            None
+        );
+    }
+
+    #[test]
+    fn same_file_from_scanner_and_open_with_is_added_once() {
+        // Гонка сканера и «Открыть с помощью»: оба прочитали файл, пока его не было.
+        let sandbox = Sandbox::new("race");
+        let (library, memory) = sandbox.library();
+        let path = fixture("tagged.flac").to_string_lossy().into_owned();
+        let id = library.id_for(&path);
+        let track = tags::read_track(&LocalFiles, &MediaUri(path.clone()), id).unwrap();
+        assert!(library.insert(track.clone()));
+        assert!(!library.insert(track));
+        assert_eq!(library.tracks().len(), 1);
+        assert!(memory.track(id).is_some());
+        // И «Открыть с помощью» после сканера: файл не добавляется заново, но находится.
+        assert!(library.add_files(vec![path.clone()]).tracks.is_empty());
+        assert_eq!(library.track_by_path(&path).map(|t| t.id), Some(id));
     }
 }

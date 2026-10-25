@@ -59,7 +59,9 @@ fn core(output: &ManualOutput, tracks: &[(u64, &str)]) -> (Core, Arc<Recorder>) 
 fn plays_queue_without_gaps() {
     let output = ManualOutput::default();
     let (core, recorder) = core(&output, &[(1, "a.flac"), (2, "b.flac")]);
+    assert!(core.queue().is_empty());
     core.dispatch(play(&[1, 2], 0)).unwrap();
+    assert_eq!(core.queue(), [TrackId(1), TrackId(2)]);
     let played = play_until(&core, &output, stopped);
     // Два куска одного сигнала склеились в исходник сэмпл в сэмпл.
     assert!(played == read_wav("full.wav"));
@@ -175,6 +177,10 @@ fn invalid_queue_is_rejected() {
     let (core, _) = core(&output, &[]);
     assert_eq!(core.dispatch(play(&[], 0)), Err(CoreError::InvalidQueue));
     assert_eq!(core.dispatch(play(&[1], 1)), Err(CoreError::InvalidQueue));
+    assert!(
+        core.queue().is_empty(),
+        "отвергнутая очередь не применяется"
+    );
 }
 
 #[test]

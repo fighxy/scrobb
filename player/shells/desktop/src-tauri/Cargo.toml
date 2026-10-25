@@ -27,6 +27,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 ureq = "3.5.0"
 keyring = "4.2.0"
+# Обложки: уменьшение и цвет. Только нужные форматы — встроенные обложки почти всегда JPEG или PNG.
+image = { version = "=0.25.10", default-features = false, features = ["jpeg", "png"] }
 
 player-core = { path = "../../../core/crates/player-core" }
 player-domain = { path = "../../../core/crates/player-domain" }

@@ -144,7 +144,18 @@ export interface Backend {
   onEvent(handler: (event: CoreEvent) => void): Promise<() => void>;
   /** Открыть ссылку системным браузером. */
   openUrl(url: string): Promise<void>;
+  /** Треки очереди по порядку — для «Далее». */
+  queue(): Promise<TrackId[]>;
+  /** Адрес обложки для `<img>`; если обложки нет, картинка не загрузится. */
+  coverUrl(id: TrackId, size: CoverSize): string;
+  /** Цвет обложки для фона под белым текстом (`#rrggbb`) или `null`. */
+  coverColor(id: TrackId): Promise<string | null>;
+  /** Показать файл в файловом менеджере. */
+  revealInFolder(path: string): Promise<void>;
 }
+
+/** `s` — 128 px для строк и плиток, `l` — 640 px для «Сейчас играет» и шапок. */
+export type CoverSize = "s" | "l";
 
 /** Текст ошибки команды для пользователя. */
 export function describeError(error: unknown): string {

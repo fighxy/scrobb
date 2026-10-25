@@ -35,6 +35,11 @@ impl Queue {
         self.current.map(|i| (i, self.items.len()))
     }
 
+    /// Треки очереди по порядку.
+    pub fn tracks(&self) -> &[TrackId] {
+        &self.items
+    }
+
     /// Сколько треков в очереди.
     pub fn len(&self) -> usize {
         self.items.len()

@@ -7,7 +7,8 @@
 //! - [`read_wav`] — эталон, прочитанный без Symphonia, чтобы не зависеть
 //!   от проверяемого декодера;
 //! - [`ManualClock`] — часы, которые двигает тест;
-//! - [`history`] — общие проверки любого `HistoryStore`.
+//! - [`history`] — общие проверки любого `HistoryStore`;
+//! - [`disk`] — настоящие папки: порт над диском и временная папка.
 
 use std::io::Cursor;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
@@ -19,6 +20,7 @@ use player_ports::{
     AudioOutput, Clock, FileAccess, FileEntry, MediaStream, PcmFormat, PcmSource, PortError,
 };
 
+pub mod disk;
 pub mod history;
 
 /// Папка с тестовыми файлами.

@@ -1,5 +1,6 @@
 //! Библиотека: трек по идентификатору ([`TrackStore`]), сканер папок
-//! ([`scan`]) и чтение тегов ([`tags`], lofty) — оба через порт `FileAccess`.
+//! ([`scan`]), чтение тегов ([`tags`], lofty) и обложек ([`covers`]) — всё
+//! через порт `FileAccess`.
 //! Позже — база SQLite с FTS5, умные плейлисты (свой язык запросов → SQL),
 //! слежение за изменениями папок.
 //!
@@ -11,6 +12,7 @@ use std::sync::RwLock;
 
 use player_domain::{Track, TrackId};
 
+pub mod covers;
 pub mod scan;
 pub mod tags;
 

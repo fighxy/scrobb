@@ -4,7 +4,11 @@
 //
 // Параметры адреса: `?demo=empty` — пустая библиотека; `?demo=playing` —
 // сразу играет трек; `?demo=linking` — открыто окно привязки;
-// `?demo=scanning` — идёт сканирование папки.
+// `?demo=scanning` — идёт сканирование папки; `?demo=big` — 10 000 треков
+// (проверка плавности прокрутки).
+//
+// Обложки — SVG-градиенты с оттенком от названия альбома; у одного альбома
+// обложки нет, чтобы была видна заглушка.
 
 import type {
   Added,
@@ -18,6 +22,7 @@ import type {
   ScrobbleStatus,
   Snapshot,
   Track,
+  TrackId,
 } from "./core";
 
 const DEMO: Array<[string, string, string, number]> = [
@@ -51,11 +56,55 @@ function track(i: number, [title, artist, album, duration]: (typeof DEMO)[number
   };
 }
 
+/** Альбом без обложки: на нём видна заглушка. */
+const NO_COVER = "Всё идёт по плану";
+
+/** Оттенок от названия (FNV-1a): у похожих названий — разные цвета. */
+function hue(text: string): number {
+  let h = 0x811c9dc5;
+  for (const ch of text) h = Math.imul(h ^ ch.codePointAt(0)!, 16777619) >>> 0;
+  return h % 360;
+}
+
+function hslToHex(h: number, s: number, l: number): string {
+  const f = (n: number) => {
+    const k = (n + h / 30) % 12;
+    const c = l - s * Math.min(l, 1 - l) * Math.max(-1, Math.min(k - 3, 9 - k, 1));
+    return Math.round(c * 255).toString(16).padStart(2, "0");
+  };
+  return `#${f(0)}${f(8)}${f(4)}`;
+}
+
+function coverSvg(album: string, artist: string): string {
+  const h = hue(album);
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+<defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+<stop offset="0" stop-color="hsl(${h} 70% 58%)"/><stop offset="1" stop-color="hsl(${(h + 50) % 360} 65% 22%)"/>
+</linearGradient></defs>
+<rect width="100" height="100" fill="url(#g)"/>
+<circle cx="${30 + (h % 40)}" cy="${25 + (h % 30)}" r="${14 + (h % 12)}" fill="white" fill-opacity="0.28"/>
+<text x="8" y="80" font-family="Inter, sans-serif" font-size="9" font-weight="700" fill="white">${album.slice(0, 22)}</text>
+<text x="8" y="91" font-family="Inter, sans-serif" font-size="7" fill="white" opacity="0.8">${artist.slice(0, 26)}</text>
+</svg>`;
+  return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+}
+
+/** 10 000 треков: 400 артистов по 2 альбома по 12–13 треков. */
+function bigLibrary(): Track[] {
+  return Array.from({ length: 10_000 }, (_, i) => {
+    const [title] = DEMO[i % DEMO.length];
+    const artist = `Артист ${String(Math.floor(i / 25) + 1).padStart(3, "0")}`;
+    const album = `Альбом ${Math.floor(i / 12.5) + 1}`;
+    return track(i, [`${title} (${i + 1})`, artist, album, 150_000 + ((i * 7919) % 240_000)]);
+  });
+}
+
 export function createMockBackend(search = location.search): Backend {
   const demo = new URLSearchParams(search).get("demo");
   const listeners = new Set<(e: CoreEvent) => void>();
   const libraryListeners = new Set<(e: LibraryEvent) => void>();
-  let tracks: Track[] = demo === "empty" ? [] : DEMO.map((d, i) => track(i, d));
+  let tracks: Track[] = demo === "empty" ? [] : demo === "big" ? bigLibrary() : DEMO.map((d, i) => track(i, d));
+  const byId = (id: TrackId) => tracks.find((t) => t.id === id);
   let folders: string[] = demo === "empty" ? [] : ["/home/ivan/Музыка"];
   let scanning: Scanning | null =
     demo === "scanning" ? { folder: "/home/ivan/Музыка/Новое", found: 1240, read: 386 } : null;
@@ -233,5 +282,20 @@ export function createMockBackend(search = location.search): Backend {
     async openUrl(url) {
       window.open(url, "_blank", "noopener");
     },
+    async queue() {
+      return queue;
+    },
+    coverUrl(id) {
+      const t = byId(id);
+      // Пустой data-адрес не раскодируется — как 404 у настоящей схемы.
+      if (!t?.album || t.album === NO_COVER) return "data:,";
+      return coverSvg(t.album, t.artists[0] ?? "");
+    },
+    async coverColor(id) {
+      const t = byId(id);
+      if (!t?.album || t.album === NO_COVER) return null;
+      return hslToHex(hue(t.album), 0.55, 0.3);
+    },
+    async revealInFolder() {},
   };
 }

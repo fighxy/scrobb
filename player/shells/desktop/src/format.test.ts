@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { PlayerState } from "./core";
-import { artists, duration, folderName, livePosition, playedAt } from "./format";
+import { ALBUMS, artists, count, duration, folderName, livePosition, longDuration, playedAt, plural, TRACKS } from "./format";
 
 const state = (patch: Partial<PlayerState>): PlayerState => ({
   status: "playing",
@@ -61,5 +61,38 @@ describe("artists", () => {
   it("joins and has a fallback", () => {
     expect(artists(["Кино", "Виктор Цой"])).toBe("Кино, Виктор Цой");
     expect(artists([])).toBe("Неизвестный артист");
+  });
+});
+
+describe("plural and count", () => {
+  it("picks the Russian form", () => {
+    const forms = [0, 1, 2, 4, 5, 11, 12, 14, 21, 22, 25, 101, 111].map((n) => `${n} ${plural(n, TRACKS)}`);
+    expect(forms).toEqual([
+      "0 треков",
+      "1 трек",
+      "2 трека",
+      "4 трека",
+      "5 треков",
+      "11 треков",
+      "12 треков",
+      "14 треков",
+      "21 трек",
+      "22 трека",
+      "25 треков",
+      "101 трек",
+      "111 треков",
+    ]);
+    expect(plural(3, ALBUMS)).toBe("альбома");
+  });
+
+  it("separates thousands and the word with non-breaking spaces", () => {
+    expect(count(12_345, TRACKS)).toBe("12\u00a0345\u00a0треков");
+  });
+});
+
+describe("longDuration", () => {
+  it("minutes, then hours and minutes", () => {
+    expect(longDuration(47 * 60_000)).toBe("47\u00a0мин");
+    expect(longDuration(125 * 60_000 + 20_000)).toBe("2\u00a0ч 05\u00a0мин");
   });
 });

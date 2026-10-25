@@ -30,3 +30,10 @@ ff -i a.flac -c copy -map_metadata -1 \
   -metadata REPLAYGAIN_TRACK_GAIN="-6.50 dB" -metadata REPLAYGAIN_TRACK_PEAK="0.988" \
   -metadata REPLAYGAIN_ALBUM_GAIN="-7.25 dB" -metadata REPLAYGAIN_ALBUM_PEAK="0.999" \
   tagged.flac
+# Встроенная обложка (картинка 64×64 цвета 0xc0392b, тип «Cover (front)»): тот же a.flac.
+# Картинка — сначала в файл: `-frames:v 1` при прикреплении оборвал бы и звук.
+ff -f lavfi -i "color=c=0xc0392b:s=64x64" -frames:v 1 cover.png
+ff -i a.flac -i cover.png -map 0:a -map 1:v -c:a copy -c:v png -disposition:v attached_pic \
+  -metadata:s:v comment="Cover (front)" -map_metadata -1 -metadata ALBUM="Звезда по имени Солнце" \
+  -bitexact covered.flac
+rm cover.png

@@ -17,13 +17,13 @@ player/core/                 Cargo workspace
     player-ports/            порты: звук, медиасессия, файлы, секреты, сеть, часы ─┐
     player-engine/           звуковой движок: gapless, ReplayGain, перемотка      │ нативный
     player-output-cpal/      вывод звука через cpal (адаптер порта AudioOutput)   │
-    player-library/          трек по id, сканер папок, теги; SQLite — позже       │ ярус плеера
+    player-library/          трек по id, папки, теги, обложки; SQLite — позже     │ ярус плеера
     player-store-sqlite/     SQLite: история прослушиваний и очередь отправки     │
     player-metadata/         MusicBrainz, AcoustID, кодировки (заготовка)         │
     player-plugins/          хост WASM-плагинов (заготовка)                       │
     player-core/             фасад: очередь + библиотека + движок + история      ─┘
     player-testkit/          обвязка тестов: ручной вывод звука, часы, фикстуры,
-                             общие проверки хранилищ истории
+                             общие проверки хранилищ истории, папки на диске
   bindings/
     ffi/                     → Swift и Kotlin для нативных оболочек (UniFFI, позже)
     wasm/                    → npm-пакет для веб-приложения Scrobb и расширения (wasm-bindgen, позже)
@@ -86,6 +86,7 @@ scripts/check.sh
 
 Что проверяют тесты (`crates/player-engine/tests`; фикстуры лежат в `crates/player-testkit/fixtures`, их генерирует `generate.sh` через ffmpeg):
 - два куска FLAC, разрезанные посреди пакета, склеиваются в исходный сигнал сэмпл в сэмпл;
+- FLAC со встроенной обложкой (блок PICTURE) звучит так же, как без неё;
 - два куска MP3 дают ровно исходное число кадров и совпадают с декодированием ffmpeg;
 - перемотка попадает в точный кадр (тест ждёт события `Seeked`, поэтому не зависит от тайминга потоков);
 - на паузе ни один кадр не теряется и не повторяется;
@@ -167,13 +168,17 @@ cargo run --release -p player-output-cpal --example play -- --rate=48000 a.flac 
 ## Оболочки
 
 - **Десктоп** — [`player/shells/desktop`](../shells/desktop/README.md): Tauri 3 + React. Ядро подключено крейтом, без FFI; типы ядра для этого сериализуются (`serde`), формат закреплён тестом `crates/player-core/tests/json.rs`.
+- **Что ядро даёт оболочкам сверх команд и событий:**
+  - `Core::queue()` — треки очереди по порядку для «Далее». Отдельно от снимка состояния: очередь бывает длиной во всю библиотеку, а снимок уходит в окно при каждой смене состояния.
+  - `player-library::covers` — обложка трека через порт `FileAccess`: встроенная в теги (сначала «передняя обложка»), иначе `cover`/`folder`/`front`/`album`/`albumart` с расширением `.jpg`/`.jpeg`/`.png` в папке трека. Уменьшение и кэш — дело оболочки.
+  - При сканировании теги читаются без картинок (`read_cover_art(false)`): обложка в FLAC бывает на мегабайты.
 
 ## Что дальше
 
 По порядку из [player-architecture.md](../../docs/player-architecture.md) §9:
 1. Десктоп: медиаклавиши и системная медиасессия, база библиотеки ([README оболочки](../shells/desktop/README.md), «Чего пока нет»). Затем — спайк фонового воспроизведения в минимальных оболочках на Android и iOS.
 2. UniFFI в `bindings/ffi`: Swift и Kotlin, callback-интерфейсы для `Observer` и портов.
-3. Библиотека: SQLite + FTS5, окна списков (сканер папок и чтение тегов уже есть — `player-library::scan` и `player-library::tags`).
+3. Библиотека: SQLite + FTS5, окна списков (сканер папок, теги и обложки уже есть — `player-library::scan`, `tags`, `covers`).
 4. `bindings/wasm`: wasm-bindgen и npm-пакет для веба и расширения.
 
 ## Лицензия

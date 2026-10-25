@@ -5,6 +5,7 @@
 
 use std::io::BufReader;
 
+use lofty::config::ParseOptions;
 use lofty::prelude::{Accessor, AudioFile, ItemKey, TaggedFileExt};
 use lofty::probe::Probe;
 use lofty::tag::Tag;
@@ -30,7 +31,9 @@ pub fn read_track(files: &dyn FileAccess, uri: &MediaUri, id: TrackId) -> Result
         recording_mbid: None,
         replay_gain: ReplayGain::default(),
     };
+    // Обложки при сканировании не нужны, а в FLAC их бывает на мегабайты.
     let Ok(tagged) = Probe::new(BufReader::new(stream))
+        .options(ParseOptions::new().read_cover_art(false))
         .guess_file_type()
         .map_err(drop)
         .and_then(|probe| probe.read().map_err(drop))
@@ -121,6 +124,14 @@ mod tests {
             }
         );
         // 11 113 кадров при 44,1 кГц = 251,99 мс; lofty отбрасывает доли миллисекунды.
+        assert_eq!(track.duration_ms, Some(251));
+    }
+
+    #[test]
+    fn file_with_cover_is_read_without_it() {
+        let track = read_track(&Fixtures, &MediaUri("covered.flac".into()), TrackId(1)).unwrap();
+        assert_eq!(track.album.as_deref(), Some("Звезда по имени Солнце"));
+        assert_eq!(track.title, "covered");
         assert_eq!(track.duration_ms, Some(251));
     }
 

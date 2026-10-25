@@ -328,6 +328,13 @@ impl Core {
         inner.with_live_position(state)
     }
 
+    /// Треки очереди по порядку; где в ней текущий — `PlayerState::queue_position`.
+    /// Отдельно от снимка: очередь бывает длиной во всю библиотеку, а снимок
+    /// уходит в окно при каждой смене состояния.
+    pub fn queue(&self) -> Vec<TrackId> {
+        lock(&self.inner().session).queue.tracks().to_vec()
+    }
+
     /// Возможности платформы.
     pub fn capabilities(&self) -> Capabilities {
         Capabilities {

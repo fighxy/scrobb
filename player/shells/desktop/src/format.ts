@@ -47,3 +47,29 @@ export function folderName(path: string): string {
 export function artists(list: string[]): string {
   return list.length ? list.join(", ") : "Неизвестный артист";
 }
+
+export type Forms = readonly [one: string, few: string, many: string];
+
+export const TRACKS: Forms = ["трек", "трека", "треков"];
+export const ALBUMS: Forms = ["альбом", "альбома", "альбомов"];
+
+/** Форма слова для числа: 1 трек, 3 трека, 5 треков, 11 треков, 21 трек. */
+export function plural(n: number, [one, few, many]: Forms): string {
+  const mod10 = n % 10;
+  const mod100 = n % 100;
+  if (mod10 === 1 && mod100 !== 11) return one;
+  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return few;
+  return many;
+}
+
+/** «12 345 треков»: разряды — неразрывным пробелом, по русской норме. */
+export function count(n: number, forms: Forms): string {
+  return `${n.toLocaleString("ru-RU")}\u00a0${plural(n, forms)}`;
+}
+
+/** Длительность альбома или списка: «47 мин», «2 ч 05 мин». */
+export function longDuration(ms: number): string {
+  const minutes = Math.round(ms / 60_000);
+  if (minutes < 60) return `${minutes}\u00a0мин`;
+  return `${Math.floor(minutes / 60)}\u00a0ч ${String(minutes % 60).padStart(2, "0")}\u00a0мин`;
+}

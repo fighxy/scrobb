@@ -4,6 +4,7 @@
 
 mod adapters;
 mod bridge;
+mod covers;
 mod library;
 
 use tauri::{Manager, RunEvent};
@@ -14,6 +15,21 @@ pub fn run() {
         .runtime(tauri_runtime_wry::Wry::default())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
+        // Обложки готовятся в пуле `covers`, поток WebView не ждёт.
+        .register_asynchronous_uri_scheme_protocol(covers::SCHEME, |ctx, request, responder| {
+            let Some(player) = ctx.app_handle().try_state::<bridge::Player>() else {
+                let unavailable = tauri::http::Response::builder()
+                    .status(tauri::http::StatusCode::SERVICE_UNAVAILABLE)
+                    .body(Vec::new())
+                    .expect("пустой ответ собирается");
+                return responder.respond(unavailable);
+            };
+            let covers = player.covers();
+            let path = request.uri().path().to_owned();
+            covers
+                .clone()
+                .spawn(move || responder.respond(covers.respond(&path)));
+        })
         .setup(|app| {
             let player = bridge::Player::start(app.handle())?;
             let paths: Vec<String> = std::env::args()
@@ -32,6 +48,8 @@ pub fn run() {
             bridge::remove_folder,
             bridge::rescan_library,
             bridge::recent_plays,
+            bridge::queue,
+            bridge::cover_color,
         ])
         .build(tauri::generate_context!())
         .expect("приложение собирается");

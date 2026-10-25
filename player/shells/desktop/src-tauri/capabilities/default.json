@@ -1,7 +1,14 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Главное окно: события ядра, выбор файлов, ссылки в браузере",
-  "windows": ["main"],
-  "permissions": ["core:default", "dialog:allow-open", "opener:default"]
+  "description": "Главное окно: события ядра, выбор файлов, ссылки в браузере, «Показать в папке»",
+  "windows": [
+    "main"
+  ],
+  "permissions": [
+    "core:default",
+    "dialog:allow-open",
+    "opener:default",
+    "opener:allow-reveal-items-in-dir"
+  ]
 }
